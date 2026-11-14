@@ -22,6 +22,10 @@ const zh = {
   app: {
     title: "轻语 Whisper",
     errorRestart: "应用遇到错误，请重启。",
+    navFeatures: "功能",
+    navHome: "首页",
+    navHistory: "历史记录",
+    navSettings: "设置",
   },
   selection: {
     toolbarLabel: "划词助手操作",
@@ -722,8 +726,6 @@ const zh = {
     goToDownload: "前往下载",
     checkUpdate: "检查更新",
     updateSource: "更新来源：GitHub Releases",
-    footer: "轻语 Whisper",
-    footerSubtitle: "本地语音转文字",
   },
 };
 

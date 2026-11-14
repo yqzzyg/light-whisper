@@ -1,7 +1,8 @@
 import React, { Suspense, lazy, useState, useRef, useCallback, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { Toaster } from "sonner";
-import { CircleCheck, CircleAlert, Info, TriangleAlert, LoaderCircle } from "lucide-react";
+import { CircleCheck, CircleAlert, Info, TriangleAlert, LoaderCircle, Home, History, Settings, type LucideIcon } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { RecordingProvider } from "./contexts/RecordingContext";
 import { prefersReducedMotion } from "./lib/motion";
@@ -9,6 +10,7 @@ import MainPage from "./pages/MainPage";
 import { useTheme } from "./hooks/useTheme";
 import { useProfileSaveNotifications } from "./hooks/useProfileSaveNotifications";
 import i18n from "./i18n";
+import { useTranslation } from "react-i18next";
 import "./styles/theme.css";
 import "./styles/pages.css";
 
@@ -17,6 +19,12 @@ const loadSettingsPage = () => import("./pages/SettingsPage");
 const loadHistoryPage = () => import("./pages/HistoryPage");
 const SettingsPage = lazy(loadSettingsPage);
 const HistoryPage = lazy(loadHistoryPage);
+
+const navItems: Array<{ id: View; labelKey: string; icon: LucideIcon }> = [
+  { id: "main", labelKey: "app.navHome", icon: Home },
+  { id: "history", labelKey: "app.navHistory", icon: History },
+  { id: "settings", labelKey: "app.navSettings", icon: Settings },
+];
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -53,11 +61,17 @@ class ErrorBoundary extends React.Component<
 }
 
 export function App() {
+  const { t } = useTranslation();
   const [view, setView] = useState<View>("main");
   const [animClass, setAnimClass] = useState("");
+  const [appVersion, setAppVersion] = useState("");
   const isTransitioning = useRef(false);
   useTheme();
   useProfileSaveNotifications();
+
+  useEffect(() => {
+    void getVersion().then(setAppVersion).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const preloadTimer = window.setTimeout(() => {
@@ -114,9 +128,45 @@ export function App() {
 
   return (
     <RecordingProvider>
-      <div style={{ height: "100%", width: "100%" }}>
-        <div style={{ height: "100%", width: "100%" }}>
-          <Suspense fallback={<div style={{ height: "100%", width: "100%" }} />}>
+      <div className="app-shell">
+        <aside className="app-sidebar">
+          <div className="app-sidebar-brand">
+            <div className="app-sidebar-logo" aria-hidden="true">W</div>
+            <span className="app-sidebar-name">{t("app.title")}</span>
+            {appVersion && <kbd className="app-sidebar-version">v{appVersion}</kbd>}
+          </div>
+          <nav className="app-sidebar-nav">
+            <div className="app-sidebar-section-label">{t("app.navFeatures")}</div>
+            {navItems.slice(0, 2).map(({ id, labelKey, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className="app-sidebar-tab"
+                data-active={view === id}
+                onClick={() => navigateTo(id)}
+              >
+                <Icon size={18} aria-hidden="true" />
+                <span>{t(labelKey)}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="app-sidebar-footer">
+            {navItems.slice(2).map(({ id, labelKey, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className="app-sidebar-tab"
+                data-active={view === id}
+                onClick={() => navigateTo(id)}
+              >
+                <Icon size={18} aria-hidden="true" />
+                <span>{t(labelKey)}</span>
+              </button>
+            ))}
+          </div>
+        </aside>
+        <main className="app-content">
+          <Suspense fallback={<div className="app-content" />}>
             {view === "main" ? (
               <MainPage onNavigate={navigateTo} animClass={animClass} />
             ) : view === "settings" ? (
@@ -125,7 +175,7 @@ export function App() {
               <HistoryPage onNavigate={navigateTo} animClass={animClass} />
             )}
           </Suspense>
-        </div>
+        </main>
       </div>
       <Toaster
         className="app-toaster"

@@ -2301,7 +2301,7 @@ export default function SettingsPage({
         }
       />
 
-      <div className={pageContentClass} style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+      <div className={pageContentClass} style={{ display: "flex", flexDirection: "row", flex: 1, minHeight: 0, overflow: "hidden" }}>
         {!settingsReady ? (
           <div className="settings-content settings-load-state" role={profileLoadError ? "alert" : "status"}>
             {profileLoadError ? (
@@ -4063,15 +4063,6 @@ export default function SettingsPage({
           />
         </div>
       </div>
-
-        {/* Footer */}
-        <div className="settings-footer" style={{ padding: `10px ${PADDING}px` }}>
-          <p className="settings-footer-text">
-            {t("settings.footer")} <span className="settings-footer-version">v{appVersion}</span>
-            <span style={{ margin: "0 6px" }}>·</span>
-            {t("settings.footerSubtitle")}
-          </p>
-        </div>
           </>
         )}
       </div>

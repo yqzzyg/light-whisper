@@ -24,6 +24,10 @@ const en: TranslationSchema = {
   app: {
     title: "Light Whisper",
     errorRestart: "An error occurred. Please restart the app.",
+    navFeatures: "Features",
+    navHome: "Home",
+    navHistory: "History",
+    navSettings: "Settings",
   },
   selection: {
     toolbarLabel: "Selection assistant actions",
@@ -724,8 +728,6 @@ const en: TranslationSchema = {
     goToDownload: "Go to Download",
     checkUpdate: "Check for Updates",
     updateSource: "Source: GitHub Releases",
-    footer: "Light Whisper",
-    footerSubtitle: "Local speech-to-text",
   },
 } as const;
 
