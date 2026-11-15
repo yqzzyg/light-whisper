@@ -332,6 +332,39 @@ pub async fn read_audio(file_name: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("读取历史音频失败: {error}"))
 }
 
+/// 查找某条历史记录已保存的录音文件路径。
+/// 记录没有音频、路径非法或文件已被清理时返回 None。
+pub async fn audio_file_path(id: i64) -> Result<Option<PathBuf>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || audio_file_path_blocking(id))
+        .await
+        .map_err(|error| format!("查找历史音频任务失败: {error}"))?
+}
+
+fn audio_file_path_blocking(id: i64) -> Result<Option<PathBuf>, String> {
+    let connection = open_connection()?;
+    let audio_file: Option<String> = connection
+        .query_row(
+            "SELECT audio_file FROM transcription_history WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "历史记录不存在".to_string(),
+            other => format!("查询历史音频失败: {other}"),
+        })?;
+    let Some(file_name) = audio_file else {
+        return Ok(None);
+    };
+    let Some(path) = safe_audio_path(&file_name) else {
+        return Ok(None);
+    };
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
 fn optional_u64(value: Option<i64>) -> Option<u64> {
     value.and_then(|value| u64::try_from(value).ok())
 }
@@ -1184,6 +1217,63 @@ mod tests {
             !audio_path.exists(),
             "last release reclaims the unreferenced WAV"
         );
+    }
+
+    #[tokio::test]
+    async fn audio_file_path_resolves_records_with_existing_audio() {
+        if run_audio_lease_test_in_child(
+            "services::history_service::tests::audio_file_path_resolves_records_with_existing_audio",
+        ) {
+            return;
+        }
+        super::initialize().await.unwrap();
+        let audio_file = "formal-reveal.wav";
+        let audio_path = safe_audio_path(audio_file).unwrap();
+        std::fs::create_dir_all(audio_path.parent().unwrap()).unwrap();
+        std::fs::write(&audio_path, b"wav").unwrap();
+
+        let connection = super::open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO transcription_history \
+                 (session_id, created_at, updated_at, mode, status, text, original_text, engine, audio_file) \
+                 VALUES (8, 1, 1, 'dictation', 'success', 'final', 'raw', 'sensevoice', ?1)",
+                params![audio_file],
+            )
+            .unwrap();
+        let id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO transcription_history \
+                 (session_id, created_at, updated_at, mode, status, text, original_text, engine) \
+                 VALUES (9, 1, 1, 'dictation', 'success', 'final', 'raw', 'sensevoice')",
+                [],
+            )
+            .unwrap();
+        let id_without_audio = connection.last_insert_rowid();
+
+        // 已保存音频且文件存在：返回完整路径
+        assert_eq!(
+            super::audio_file_path(id).await.unwrap(),
+            Some(audio_path.clone())
+        );
+        // 记录没有音频：None
+        assert_eq!(
+            super::audio_file_path(id_without_audio).await.unwrap(),
+            None
+        );
+        // 记录不存在：报错
+        assert!(super::audio_file_path(id + 2).await.is_err());
+        // 文件被外部清理：None
+        std::fs::remove_file(&audio_path).unwrap();
+        assert_eq!(super::audio_file_path(id).await.unwrap(), None);
+
+        connection
+            .execute(
+                "DELETE FROM transcription_history WHERE id IN (?1, ?2)",
+                params![id, id_without_audio],
+            )
+            .unwrap();
     }
 
     #[tokio::test]

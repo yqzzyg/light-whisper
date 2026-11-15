@@ -36,6 +36,36 @@ pub async fn delete_transcription_history(
     Ok(removed)
 }
 
+/// 在系统文件管理器中定位历史记录的录音文件。
+/// Windows 下用 explorer /select 选中该文件，其它平台打开所在目录。
+#[tauri::command]
+pub async fn reveal_history_audio(id: i64) -> Result<(), String> {
+    let Some(path) = history_service::audio_file_path(id).await? else {
+        return Err("录音文件不存在或已被清理".into());
+    };
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer.exe")
+            // explorer 的 /select 需要与路径拼在同一参数里，raw_arg 避免引号被双重转义。
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map_err(|error| format!("打开文件目录失败: {error}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let directory = path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::process::Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| format!("打开文件目录失败: {error}"))?;
+    }
+    Ok(())
+}
+
 fn export_markdown(records: &[history_service::HistoryRecord]) -> String {
     let mut output = String::from("# 轻语 Whisper 转写历史\n\n");
     for record in records {

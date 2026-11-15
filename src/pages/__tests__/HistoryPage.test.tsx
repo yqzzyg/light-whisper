@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   hideMainWindow: vi.fn(),
   listTranscriptionHistory: vi.fn(),
   reprocessTranscriptionHistory: vi.fn(),
+  revealHistoryAudio: vi.fn(),
 }));
 
 const event = vi.hoisted(() => ({ listen: vi.fn() }));
@@ -60,6 +61,7 @@ vi.mock("react-i18next", () => ({
       "historyPage.rawText": "原始 ASR",
       "historyPage.sourceText": "编辑原文",
       "historyPage.reprocessAsr": "使用当前引擎重新识别",
+      "historyPage.openAudioFolder": "打开录音所在文件夹",
       "historyPage.reprocessDone": "已生成新的历史记录",
       "historyPage.reprocessPolish": "使用当前模型重新润色",
       "historyPage.searchPlaceholder": "搜索文本、应用或窗口…",
@@ -427,6 +429,27 @@ describe("HistoryPage", () => {
 
     await waitFor(() => expect(api.deleteTranscriptionHistory).toHaveBeenCalledWith(7));
     expect(screen.getByText("润色后的最终文本")).toBeInTheDocument();
+  });
+
+  it("reveals the saved audio folder for records with audio", async () => {
+    render(<HistoryPage onNavigate={vi.fn()} />);
+    await screen.findByText("润色后的最终文本");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开录音所在文件夹" }));
+    await waitFor(() => {
+      expect(api.revealHistoryAudio).toHaveBeenCalledWith(7);
+    });
+  });
+
+  it("toasts when the saved audio is missing", async () => {
+    api.revealHistoryAudio.mockRejectedValue(new Error("录音文件不存在或已被清理"));
+    render(<HistoryPage onNavigate={vi.fn()} />);
+    await screen.findByText("润色后的最终文本");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开录音所在文件夹" }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalled();
+    });
   });
 
   it("shows both the edit instruction and selected source text", async () => {

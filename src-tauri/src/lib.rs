@@ -370,6 +370,7 @@ pub fn run() {
             commands::history::list_transcription_history,
             commands::history::get_transcription_history_stats,
             commands::history::delete_transcription_history,
+            commands::history::reveal_history_audio,
             commands::history::export_transcription_history,
             commands::history::reprocess_transcription_history,
         ]))

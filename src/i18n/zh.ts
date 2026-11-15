@@ -87,6 +87,8 @@ const zh = {
     reprocessed: "重新处理",
     reprocessPolish: "使用当前模型重新润色",
     reprocessAsr: "使用当前引擎重新识别",
+    openAudioFolder: "打开录音所在文件夹",
+    audioFolderUnavailable: "无法打开录音文件夹：{{error}}",
     reprocessing: "重新处理中…",
     reprocessDone: "已生成新的历史记录",
     reprocessFailed: "重新处理失败：{{error}}",

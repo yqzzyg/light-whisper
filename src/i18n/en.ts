@@ -89,6 +89,8 @@ const en: TranslationSchema = {
     reprocessed: "Reprocessed",
     reprocessPolish: "Polish again with the current model",
     reprocessAsr: "Transcribe again with the current engine",
+    openAudioFolder: "Open recording folder",
+    audioFolderUnavailable: "Could not open the recording folder: {{error}}",
     reprocessing: "Reprocessing…",
     reprocessDone: "Created a new history record",
     reprocessFailed: "Reprocessing failed: {{error}}",

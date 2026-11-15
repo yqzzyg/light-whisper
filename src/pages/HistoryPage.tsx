@@ -10,6 +10,7 @@ import {
   Copy,
   Download,
   FileAudio,
+  FolderOpen,
   Minus,
   RefreshCw,
   Search,
@@ -28,6 +29,7 @@ import {
   hideMainWindow,
   listTranscriptionHistory,
   reprocessTranscriptionHistory,
+  revealHistoryAudio,
 } from "@/api/tauri";
 import TitleBar from "@/components/TitleBar";
 import { prefersReducedMotion } from "@/lib/motion";
@@ -197,6 +199,14 @@ export default function HistoryPage({
       toast.error(t("historyPage.reprocessFailed", { error: errorMessage(error) }));
     } finally {
       setWorkingId(null);
+    }
+  };
+
+  const revealAudio = async (record: PersistentHistoryRecord) => {
+    try {
+      await revealHistoryAudio(record.id);
+    } catch (error) {
+      toast.error(t("historyPage.audioFolderUnavailable", { error: errorMessage(error) }));
     }
   };
 
@@ -410,6 +420,11 @@ export default function HistoryPage({
                     {canReprocess && record.audioAvailable && (
                       <button className="icon-btn icon-btn-sm" disabled={isWorking} title={t("historyPage.reprocessAsr")} aria-label={t("historyPage.reprocessAsr")} onClick={() => void reprocess(record, "asr")}>
                         <RefreshCw size={13} />
+                      </button>
+                    )}
+                    {record.audioAvailable && (
+                      <button className="icon-btn icon-btn-sm" title={t("historyPage.openAudioFolder")} aria-label={t("historyPage.openAudioFolder")} onClick={() => void revealAudio(record)}>
+                        <FolderOpen size={13} />
                       </button>
                     )}
                     <button className="icon-btn icon-btn-sm" title={t("common.copy")} aria-label={t("common.copy")} onClick={() => void copyRecord(record)}>

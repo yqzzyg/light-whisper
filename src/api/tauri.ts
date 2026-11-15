@@ -339,6 +339,10 @@ export function deleteTranscriptionHistory(id: number): Promise<boolean> {
   return invokeCommand<boolean>("delete_transcription_history", { id });
 }
 
+export function revealHistoryAudio(id: number): Promise<void> {
+  return invokeCommand<void>("reveal_history_audio", { id });
+}
+
 export function exportTranscriptionHistory(format: "json" | "markdown"): Promise<string | null> {
   return invokeCommand<string | null>("export_transcription_history", { format });
 }
