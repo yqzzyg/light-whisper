@@ -1,6 +1,7 @@
 pub mod ai_polish;
 pub mod assistant;
 pub mod audio;
+pub mod audio_import;
 #[cfg(test)]
 mod audio_processing_setting_tests;
 #[cfg(test)]

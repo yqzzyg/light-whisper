@@ -134,20 +134,20 @@ impl ChunkedResampler {
     }
 }
 
-pub(super) struct ResamplerState {
+pub(crate) struct ResamplerState {
     input_rate: u32,
     inner: ChunkedResampler,
 }
 
 impl ResamplerState {
-    pub(super) fn new(input_rate: u32) -> Result<Self, String> {
+    pub(crate) fn new(input_rate: u32) -> Result<Self, String> {
         Ok(Self {
             input_rate,
             inner: ChunkedResampler::new(input_rate)?,
         })
     }
 
-    pub(super) fn push_i16<'a>(&mut self, input: &'a [i16]) -> Result<Cow<'a, [i16]>, String> {
+    pub(crate) fn push_i16<'a>(&mut self, input: &'a [i16]) -> Result<Cow<'a, [i16]>, String> {
         if input.is_empty() || self.input_rate == TARGET_SAMPLE_RATE {
             return Ok(Cow::Borrowed(input));
         }

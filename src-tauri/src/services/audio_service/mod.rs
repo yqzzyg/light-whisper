@@ -90,7 +90,7 @@ mod native_recording;
 pub(crate) mod output;
 #[cfg(test)]
 mod output_tests;
-mod resample;
+pub(crate) mod resample;
 #[cfg(test)]
 mod shared_native_route_tests;
 mod wav;
@@ -109,8 +109,8 @@ pub use interim::spawn_interim_loop;
 pub use monitor::{
     start_microphone_level_monitor, stop_microphone_level_monitor, test_microphone_sync,
 };
-pub(crate) use native_recording::spawn_native_recording;
 pub use native_recording::NativeRecording;
+pub(crate) use native_recording::{next_native_session_id, spawn_native_recording};
 pub use wav::encode_wav;
 
 pub(crate) fn uses_native_stream(engine: &str) -> bool {

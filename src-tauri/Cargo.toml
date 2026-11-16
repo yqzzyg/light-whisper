@@ -71,6 +71,9 @@ arc-swap = "1.7"
 # WAV 编解码
 hound = "3.5"
 
+# 通用音频解码（导入文件 → PCM），纯 Rust 无外部二进制
+symphonia = { version = "0.5", features = ["mp3", "flac", "wav", "isomp4", "ogg", "vorbis"] }
+
 # 本地转写历史（使用 bundled SQLite，避免依赖系统 SQLite）
 rusqlite = { version = "0.32", features = ["bundled"] }
 

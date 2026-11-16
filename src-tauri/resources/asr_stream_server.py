@@ -164,6 +164,6 @@ class ASRStreamServerMixin:
             elif action == "stream_cancel":
                 self._stream_inference_ms = 0.0
             return self._stream_response(response)
-        except Exception:
-            self.logger.error("%s 流式命令失败", self._stream_display_name)
+        except Exception as exc:
+            self.logger.error("%s 流式命令失败: %s", self._stream_display_name, exc)
             return self._stream_error()

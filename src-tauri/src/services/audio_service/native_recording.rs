@@ -15,6 +15,16 @@ use crate::utils::AppError;
 
 static NEXT_NATIVE_SESSION: AtomicU64 = AtomicU64::new(1);
 
+/// Allocate the next native ASR stream session id.
+///
+/// The resident Python server requires strictly increasing stream session ids
+/// and rejects anything not greater than the previous one. Both live recording
+/// and audio import must allocate from this shared counter, otherwise a large
+/// import id would make every later recording look stale.
+pub(crate) fn next_native_session_id() -> u64 {
+    NEXT_NATIVE_SESSION.fetch_add(1, Ordering::Relaxed)
+}
+
 pub(super) fn stream_config(
     engine: &str,
     r2_config: &crate::state::user_profile::R2T2Config,
@@ -193,7 +203,7 @@ pub(crate) fn spawn_native_recording(
         };
         // Backend identities follow actual ownership order, independently of
         // UI recording ids, so a queued short recording cannot become stale.
-        let native_id = NEXT_NATIVE_SESSION.fetch_add(1, Ordering::Relaxed);
+        let native_id = next_native_session_id();
         let client = NativeStreamClient::start(
             app.state::<AppState>().inner(),
             Some(&app),
