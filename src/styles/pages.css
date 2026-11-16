@@ -126,7 +126,10 @@
   display: block;
   width: 100%;
   min-height: 88px;
+  max-height: min(42vh, 380px);
   resize: none;
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 0;
   background: transparent;
   padding: 10px 12px;
@@ -139,8 +142,86 @@
   font-family: inherit;
   box-sizing: border-box;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   transition: background var(--dur-3) var(--ease-out-expo),
               box-shadow var(--dur-3) var(--ease-out-expo);
+}
+
+/* Expanded: show the whole transcript and let the page scroll instead. */
+.result-card-body-expanded {
+  max-height: none;
+  overflow-y: hidden;
+}
+
+/* Fade hints at more content below while the body is collapsed. */
+.result-body-wrap {
+  position: relative;
+}
+
+.result-body-fade {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  left: 1px;
+  height: 30px;
+  pointer-events: none;
+  background: linear-gradient(to top, var(--color-bg-elevated) 15%, transparent);
+}
+
+/* Only shown when the transcript exceeds the collapsed max height. */
+.result-body-actions {
+  display: flex;
+  justify-content: center;
+  padding: 2px 12px 4px;
+}
+
+.result-body-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-tertiary, rgba(128, 128, 128, 0.1));
+  color: var(--color-text-secondary);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease-out-expo),
+              background-color var(--dur-2) var(--ease-out-expo);
+}
+
+.result-body-toggle:hover,
+.result-header-toggle:hover {
+  color: var(--color-accent);
+  background: var(--color-bg-tertiary, rgba(128, 128, 128, 0.08));
+}
+
+.result-body-toggle:focus-visible,
+.result-header-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Header actions stay reachable when the transcript is expanded and long. */
+.result-card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.result-header-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease-out-expo),
+              background-color var(--dur-2) var(--ease-out-expo);
 }
 
 .result-card-body:focus {
@@ -2542,7 +2623,8 @@ select:disabled { cursor: not-allowed; opacity: 0.6; }
 
 /* The previous result remains readable while the next recognition is running. */
 .result-card-busy .result-card-body,
-.result-card-busy .result-card-stats { opacity: 0.5; }
+.result-card-busy .result-card-stats,
+.result-card-busy .result-body-fade { opacity: 0.5; }
 .result-card-body,
 .result-card-stats { transition: opacity var(--transition-fast); }
 .result-processing {

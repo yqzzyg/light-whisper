@@ -151,6 +151,8 @@ const zh = {
       total: "总计 {{ms}}ms",
     },
     editableTranscription: "识别结果，可编辑",
+    expandAll: "展开全部",
+    collapse: "收起",
     editGrab: {
       timeout: "选中文本读取超时",
       empty: "未检测到选中文本",

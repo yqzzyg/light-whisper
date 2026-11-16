@@ -153,6 +153,8 @@ const en: TranslationSchema = {
       total: "total {{ms}}ms",
     },
     editableTranscription: "Transcription result, editable",
+    expandAll: "Show all",
+    collapse: "Show less",
     editGrab: {
       timeout: "Selected text lookup timed out",
       empty: "No selected text detected",

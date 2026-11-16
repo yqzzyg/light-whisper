@@ -49,6 +49,88 @@ describe("TranscriptionResult", () => {
     expect(screen.getByText(/total 948ms/)).toBeInTheDocument();
   });
 
+  it("auto-grows the result body to fit long wrapped content", () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    let fakeScrollHeight = 180;
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => fakeScrollHeight,
+    });
+
+    try {
+      const { rerender } = render(
+        <TranscriptionResult
+          text="a very long single line that wraps over and over"
+          originalText="a very long single line that wraps over and over"
+          isProcessing={false}
+          copiedId={null}
+          onCopy={vi.fn()}
+          durationSec={null}
+          charCount={null}
+        />,
+      );
+      const body = screen.getByLabelText("result.editableTranscription") as HTMLTextAreaElement;
+      expect(body.style.height).toBe("180px");
+
+      fakeScrollHeight = 320;
+      rerender(
+        <TranscriptionResult
+          text="an even longer single line that wraps over and over and over"
+          originalText="an even longer single line that wraps over and over and over"
+          isProcessing={false}
+          copiedId={null}
+          onCopy={vi.fn()}
+          durationSec={null}
+          charCount={null}
+        />,
+      );
+      expect(body.style.height).toBe("320px");
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "scrollHeight", originalDescriptor);
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
+      }
+    }
+  });
+
+  it("collapses long results behind a toggle and expands on demand", () => {
+    const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const clientHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 600 });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 380 });
+
+    try {
+      render(
+        <TranscriptionResult
+          text={"long transcript ".repeat(80)}
+          originalText={"long transcript ".repeat(80)}
+          isProcessing={false}
+          copiedId={null}
+          onCopy={vi.fn()}
+          durationSec={null}
+          charCount={null}
+        />,
+      );
+
+      const body = screen.getByLabelText("result.editableTranscription");
+      const toggle = screen.getByRole("button", { name: "result.expandAll" });
+      expect(body).not.toHaveClass("result-card-body-expanded");
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+      fireEvent.click(toggle);
+
+      expect(body).toHaveClass("result-card-body-expanded");
+      expect(screen.getByRole("button", { name: "result.collapse" })).toHaveAttribute("aria-expanded", "true");
+
+      fireEvent.click(screen.getByRole("button", { name: "result.collapse" }));
+      expect(body).not.toHaveClass("result-card-body-expanded");
+    } finally {
+      if (scrollHeightDescriptor) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDescriptor);
+      if (clientHeightDescriptor) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDescriptor);
+    }
+  });
+
   it("keeps the final result editable and reports corrections on blur", () => {
     const onTextChange = vi.fn();
     render(
