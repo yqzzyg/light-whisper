@@ -459,6 +459,15 @@
     "commands::history::reprocess_transcription_history": [
       "history"
     ],
+    "commands::audio_import::pick_audio_file": [
+      "directory"
+    ],
+    "commands::audio_import::transcribe_imported_audio": [
+      "history"
+    ],
+    "commands::history::reveal_history_audio": [
+      "history"
+    ],
     "commands::funasr::get_gpu_idle_seconds": [
       "gpu-idle"
     ],
@@ -3334,6 +3343,9 @@
     "commands::history::delete_transcription_history": "src-tauri/src/commands/history.rs#fn delete_transcription_history(",
     "commands::history::export_transcription_history": "src-tauri/src/commands/history.rs#fn export_transcription_history(",
     "commands::history::reprocess_transcription_history": "src-tauri/src/commands/history.rs#fn reprocess_transcription_history(",
+    "commands::audio_import::pick_audio_file": "src-tauri/src/commands/audio_import.rs#fn pick_audio_file(",
+    "commands::audio_import::transcribe_imported_audio": "src-tauri/src/commands/audio_import.rs#fn transcribe_imported_audio(",
+    "commands::history::reveal_history_audio": "src-tauri/src/commands/history.rs#fn reveal_history_audio(",
     "commands::funasr::get_gpu_idle_seconds": "src-tauri/src/commands/funasr.rs#fn get_gpu_idle_seconds(",
     "commands::funasr::set_gpu_idle_seconds": "src-tauri/src/commands/funasr.rs#fn set_gpu_idle_seconds(",
     "commands::funasr::get_audio_processing_enabled": "src-tauri/src/commands/funasr.rs#fn get_audio_processing_enabled(",
