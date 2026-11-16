@@ -282,7 +282,7 @@ export interface PersistentHistoryRecord {
   createdAt: number;
   updatedAt: number;
   mode: RecordingMode;
-  workflow: "dictation" | "assistant" | "edit";
+  workflow: "dictation" | "assistant" | "edit" | "import";
   status: PersistentHistoryStatus;
   text: string;
   originalText: string;

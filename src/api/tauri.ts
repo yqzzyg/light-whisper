@@ -702,6 +702,16 @@ export function pickFolder(): Promise<string | null> {
   return invokeCommand<string | null>("pick_folder");
 }
 
+/** 选择本地音频文件，返回路径；取消返回 null。 */
+export function pickAudioFile(): Promise<string | null> {
+  return invokeCommand<string | null>("pick_audio_file");
+}
+
+/** 导入并转写音频，结果写入历史后返回该历史记录。 */
+export function transcribeImportedAudio(path: string): Promise<PersistentHistoryRecord> {
+  return invokeCommand<PersistentHistoryRecord>("transcribe_imported_audio", { path });
+}
+
 export interface ModelsDirUpdateResult {
   message: string;
   runtimeWarning: string | null;
