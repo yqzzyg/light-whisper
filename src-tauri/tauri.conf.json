@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "轻语 Whisper Dev",
+  "productName": "Minutes",
   "version": "1.7.14",
   "identifier": "com.light-whisper.dev",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "轻语 Whisper",
+        "title": "Minutes",
         "width": 1000,
         "height": 700,
         "minWidth": 880,

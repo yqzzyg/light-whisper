@@ -52,7 +52,7 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
             log::info!(
-                "轻语 Whisper 应用启动，数据目录: {:?}",
+                "会听应用启动，数据目录: {:?}",
                 utils::paths::get_data_dir()
             );
 
@@ -377,7 +377,7 @@ pub fn run() {
             commands::history::reprocess_transcription_history,
         ]))
         .run(tauri::generate_context!())
-        .expect("启动轻语 Whisper 时发生错误");
+        .expect("启动会听时发生错误");
 }
 
 fn mark_setup_once() -> bool {
@@ -630,7 +630,7 @@ fn setup_system_tray(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::e
 
     let _tray = TrayIconBuilder::with_id("main-tray")
         .icon(tray_icon::image(icon_size, false))
-        .tooltip("轻语 Whisper - 语音转文字")
+        .tooltip("会听 - 语音转文字")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

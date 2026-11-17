@@ -609,12 +609,12 @@ pub(super) async fn login(
     let html = match &result {
         Ok(status) if !status.plan_usage_enabled => callback_html(
             "Signed In",
-            "已登录，但未允许轻语使用 ChatGPT 套餐额度。请返回轻语重新授权。",
+            "已登录，但未允许会听使用 ChatGPT 套餐额度。请返回会听重新授权。",
             false,
         ),
         Ok(_) => callback_html(
             "Authorization Successful",
-            "可以关闭这个页面并返回轻语。",
+            "可以关闭这个页面并返回会听。",
             true,
         ),
         Err(error) => callback_html("Authorization Failed", error, false),
@@ -669,7 +669,7 @@ pub(super) async fn revoke(
     session: &OpenaiCodexOauthSession,
 ) -> Result<(), String> {
     const UNCONFIRMED: &str =
-        "ChatGPT 本地登录已清除，远端撤销未确认，可在 ChatGPT 设置中断开轻语。";
+        "ChatGPT 本地登录已清除，远端撤销未确认，可在 ChatGPT 设置中断开会听。";
     let registration = session.registration.as_ref().ok_or(UNCONFIRMED)?;
     let metadata = discovery(client).await.map_err(|_| UNCONFIRMED)?;
     client

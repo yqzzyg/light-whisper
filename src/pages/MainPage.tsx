@@ -135,7 +135,6 @@ export default function MainPage({ onNavigate, animClass = "" }: {
   return (
     <div className="page-root main-page">
       <TitleBar
-        title={t("app.title")}
         leftAction={
           <div className="title-bar-cluster">
             <button aria-label={t("historyPage.open")} className="icon-btn plain" onClick={() => flushPendingEditAndNavigate("history")}>

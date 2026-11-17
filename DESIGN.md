@@ -62,7 +62,7 @@ components:
     padding: "10px 12px"
 ---
 
-# Design System: 轻语 Whisper
+# Design System: 会听 Minutes
 
 ## Overview
 

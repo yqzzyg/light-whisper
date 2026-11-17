@@ -76,6 +76,21 @@ export function App() {
     void getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
+  // 系统窗口标题跟随语言：任务栏与 Alt+Tab 显示当前语言下的产品名，
+  // 不能只依赖 tauri.conf 的静态 title。
+  useEffect(() => {
+    const applyTitle = () => {
+      try {
+        void getCurrentWindow().setTitle(i18n.t("app.title")).catch(() => {});
+      } catch {
+        // 非 Tauri 运行时（测试 / 浏览器预览）没有窗口 API
+      }
+    };
+    applyTitle();
+    i18n.on?.("languageChanged", applyTitle);
+    return () => i18n.off?.("languageChanged", applyTitle);
+  }, []);
+
   useEffect(() => {
     const preloadTimer = window.setTimeout(() => {
       void loadSettingsPage().catch((error) => {
@@ -141,7 +156,7 @@ export function App() {
       <div className="app-shell">
         <aside className="app-sidebar">
           <div className="app-sidebar-brand">
-            <div className="app-sidebar-logo" aria-hidden="true">W</div>
+            <div className="app-sidebar-logo" aria-hidden="true">M</div>
             <span className="app-sidebar-name">{t("app.title")}</span>
             {appVersion && <kbd className="app-sidebar-version">v{appVersion}</kbd>}
           </div>

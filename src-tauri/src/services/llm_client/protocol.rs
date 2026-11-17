@@ -327,7 +327,7 @@ pub(crate) fn extract_openai_compat_error_message(body_text: &str) -> Option<Str
 
     let guidance = match error["code"].as_str() {
         Some("subscription_sharing_usage_limit_exceeded") => {
-            Some("轻语的 ChatGPT 套餐额度已达上限，请在 ChatGPT 设置的 Usage 页面查看额度。")
+            Some("会听的 ChatGPT 套餐额度已达上限，请在 ChatGPT 设置的 Usage 页面查看额度。")
         }
         Some("subscription_sharing_user_not_eligible") => {
             Some("当前 ChatGPT 账户或工作区未获准使用套餐接入，请检查账户与工作区权限。")

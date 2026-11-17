@@ -2,7 +2,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PADDING } from "@/lib/constants";
 
 interface TitleBarProps {
-  title: string;
+  /** 省略时不渲染标题文字，仅保留左右操作区（用于品牌名已由侧栏承担的页面） */
+  title?: string;
   leftAction?: React.ReactNode;
   rightActions?: React.ReactNode;
 }
@@ -38,9 +39,11 @@ export default function TitleBar({ title, leftAction, rightActions }: TitleBarPr
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {leftAction}
-        <span className={`title-text${!leftAction ? " title-text-indented" : ""}`}>
-          {title}
-        </span>
+        {title && (
+          <span className={`title-text${!leftAction ? " title-text-indented" : ""}`}>
+            {title}
+          </span>
+        )}
       </div>
       {rightActions && (
         <div style={{ display: "flex", alignItems: "center", gap: 2 }}>

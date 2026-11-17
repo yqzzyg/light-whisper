@@ -21,7 +21,7 @@ CARGO_LOCK="src-tauri/Cargo.lock"
 PYPROJECT_TOML="pyproject.toml"
 UV_LOCK="uv.lock"
 ENGINE_ARCHIVE="src-tauri/resources/engine.tar.xz"
-INSTALLER="src-tauri/target/release/bundle/nsis/轻语 Whisper_${VERSION}_x64-setup.exe"
+INSTALLER="src-tauri/target/release/bundle/nsis/Minutes_${VERSION}_x64-setup.exe"
 RELEASE_FILES=(
     "$PKG_JSON"
     "$TAURI_CONF"

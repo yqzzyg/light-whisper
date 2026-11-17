@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme-banner.svg" alt="Light-Whisper 轻语 — 在你正在使用的应用中，把声音变成文字" width="100%" />
+  <img src="assets/readme-banner.svg" alt="会听 — 在你正在使用的应用中，把声音变成文字" width="100%" />
 </p>
 
 <p align="center">
@@ -92,4 +92,4 @@ AI 润色、屏幕感知和助手联网搜索均提供 **关闭／开启／自�
 
 基于 Tauri、React 和 Rust 构建，Qwen3-ASR 与 Confucius4-R2T2 共用 audio.cpp，并使用 FireRedVAD。
 
-Light-Whisper 是采用 [GPL-3.0-only](LICENSE) 许可证的开源软件。第三方代码与模型继续适用各自条款，详见 [NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+会听是采用 [GPL-3.0-only](LICENSE) 许可证的开源软件。第三方代码与模型继续适用各自条款，详见 [NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

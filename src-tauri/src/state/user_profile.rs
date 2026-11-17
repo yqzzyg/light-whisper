@@ -373,6 +373,8 @@ fn default_selection_translation_target() -> String {
 
 fn default_selection_excluded_apps() -> Vec<String> {
     [
+        "minutes.exe",
+        // 兼容更名前的进程名与未清理的旧安装
         "light-whisper.exe",
         "snipaste.exe",
         "pixpin.exe",

@@ -67,7 +67,7 @@ pub async fn reveal_history_audio(id: i64) -> Result<(), String> {
 }
 
 fn export_markdown(records: &[history_service::HistoryRecord]) -> String {
-    let mut output = String::from("# 轻语 Whisper 转写历史\n\n");
+    let mut output = String::from("# 会听 转写历史\n\n");
     for record in records {
         let timestamp = chrono::DateTime::from_timestamp_millis(record.created_at)
             .map(|value| {
@@ -137,7 +137,7 @@ pub async fn export_transcription_history(
         ),
         _ => return Err("历史导出格式仅支持 JSON 或 Markdown".into()),
     };
-    let file_name = format!("light-whisper-history.{extension}");
+    let file_name = format!("minutes-history.{extension}");
     let mut dialog = rfd::AsyncFileDialog::new()
         .set_parent(&window)
         .add_filter(filter_label, &[extension])

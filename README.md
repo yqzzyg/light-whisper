@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/readme-banner.svg" alt="Light-Whisper — voice to text, right where you work" width="100%" />
+  <img src="assets/readme-banner.svg" alt="Minutes — voice to text, right where you work" width="100%" />
 </p>
 
 <p align="center">
@@ -93,4 +93,4 @@ and third-party service policies.
 
 Built with Tauri, React and Rust, using Qwen3-ASR and Confucius4-R2T2 through audio.cpp, plus FireRedVAD.
 
-Light-Whisper is open-source software under [GPL-3.0-only](LICENSE). Third-party code and models retain their own terms; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Minutes is open-source software under [GPL-3.0-only](LICENSE). Third-party code and models retain their own terms; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

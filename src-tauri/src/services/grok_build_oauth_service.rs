@@ -1076,7 +1076,7 @@ pub async fn login(
     drop(login);
     let html = callback_html(
         "Authorization Successful",
-        "可以关闭这个页面并返回轻语。",
+        "可以关闭这个页面并返回会听。",
         true,
     );
     let _ = respond_with_html(&mut stream, "200 OK", &html).await;

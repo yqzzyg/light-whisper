@@ -521,7 +521,7 @@ fn auth_from_openai_session(
     });
     let api_key = if let Some(registration) = &session.registration {
         if !registration.plan_usage_enabled() {
-            return Err("ChatGPT 套餐使用未获授权，请重新登录并允许轻语使用套餐额度。".into());
+            return Err("ChatGPT 套餐使用未获授权，请重新登录并允许会听使用套餐额度。".into());
         }
         let token = chatgpt_token
             .as_ref()

@@ -535,7 +535,7 @@ mod tests {
             user("typeless"),
             user("agent"),
             user("佳明"),
-            user("轻语"),
+            user("会听"),
             learned("同济大学"),
             learned("划词助手"),
             learned("第一性原理"),
