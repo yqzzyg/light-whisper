@@ -20,7 +20,7 @@ const zh = {
     loading: "加载中...",
   },
   app: {
-    title: "会听 Minutes",
+    title: "会听",
     errorRestart: "应用遇到错误，请重启。",
     navFeatures: "功能",
     navHome: "首页",
