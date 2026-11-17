@@ -1,13 +1,13 @@
 [package]
-name = "light-whisper"
+name = "minutes"
 version = "1.7.14"
-description = "轻语 - 本地与云端语音转文字桌面应用"
+description = "会听 - 本地与云端语音转文字桌面应用"
 authors = ["sun"]
 license = "GPL-3.0-only"
 edition = "2021"
 
 [lib]
-name = "light_whisper_lib"
+name = "minutes_lib"
 crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]

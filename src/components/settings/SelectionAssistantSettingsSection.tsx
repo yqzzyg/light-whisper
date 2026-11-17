@@ -129,7 +129,7 @@ export default function SelectionAssistantSettingsSection({
       screenshot_routing: false,
       custom_prompt: null,
       translation_target: "English",
-      excluded_apps: ["light-whisper.exe", "snipaste.exe", "pixpin.exe", "sharex.exe"],
+      excluded_apps: ["minutes.exe", "snipaste.exe", "pixpin.exe", "sharex.exe"],
     };
     const resolved = resolveSelectionModelConfig(profile.llm_provider);
     const customProvider = profile.llm_provider.custom_providers

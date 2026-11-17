@@ -681,11 +681,11 @@ mod startup_tests {
     #[test]
     fn autostart_minimized_requires_both_the_preference_and_login_argument() {
         for (enabled, args, hidden) in [
-            (false, vec!["light-whisper"], false),
-            (true, vec!["light-whisper"], false),
-            (false, vec!["light-whisper", "--minimized"], false),
-            (true, vec!["light-whisper", "--minimized"], true),
-            (true, vec!["light-whisper", "--minimized=false"], false),
+            (false, vec!["minutes"], false),
+            (true, vec!["minutes"], false),
+            (false, vec!["minutes", "--minimized"], false),
+            (true, vec!["minutes", "--minimized"], true),
+            (true, vec!["minutes", "--minimized=false"], false),
         ] {
             assert_eq!(
                 should_start_hidden(enabled, args.into_iter().map(str::to_owned)),

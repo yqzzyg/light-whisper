@@ -121,7 +121,7 @@ for path_str in ("src-tauri/Cargo.toml", "pyproject.toml"):
 cargo_lock = Path("src-tauri/Cargo.lock")
 text = cargo_lock.read_text(encoding="utf-8")
 updated, count = re.subn(
-    r'(\[\[package\]\]\s+name = "light-whisper"\s+version = ")[^"]+("\s*)',
+    r'(\[\[package\]\]\s+name = "minutes"\s+version = ")[^"]+("\s*)',
     rf'\g<1>{version}\2',
     text,
     count=1,

@@ -18,6 +18,8 @@ pub struct LlmEndpoint {
     pub api_format: ApiFormat,
 }
 
+// Windows 凭据管理器中的服务名。沿用旧值是有意的：改动后所有已保存的
+// API Key 都会读不出来，必须让用户重新填写。属于内部存储键，用户界面不可见。
 pub const KEYRING_SERVICE: &str = "light-whisper";
 
 const CEREBRAS: &str = "cerebras";
