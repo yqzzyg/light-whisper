@@ -46,6 +46,14 @@
 
 **结论**：切分只有在线引擎需要，本地引擎已内置。不需要 ffmpeg。
 
+**IPC 等待预算**：整段 `transcribe` 与流式 `StreamFinish` 会把音频一次性解码，耗时随时长线性增长
+（本机实测约 19 倍实时）。按这个速率固定 60 秒的理论上限只有约 19 分钟，机器稍慢就会在十几分钟处超时，
+因此这两类命令改用按音频时长自适应的预算：
+`max(60s, 时长 × 0.1 + 120s)`，上限 15 分钟（`funasr_service.rs::long_audio_response_timeout`）。
+时长来源：WAV 头（`audio_service::wav_duration_secs`）或流式已喂入的样本数。
+短于 30 秒的输入与其它命令（start/feed/status/exit）仍用 60 秒，实时流式小块不受影响。
+超时时错误文案会带上「音频约 N 分钟，本次等待上限 M 秒」，引擎重置提示与日志也会区分超时和连接断开。
+
 ### 2.3 项目特有的 CI 门禁
 
 `scripts/check_formal.py:check_inventory` 强制要求：

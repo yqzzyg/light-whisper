@@ -1,7 +1,8 @@
 //! Native streaming IPC client for the resident local ASR server.
 
 use super::{
-    profile_hot_words, send_command_to_server, ServerCommand, ServerResponse, TranscriptionResult,
+    profile_hot_words, send_command_to_server, send_command_to_server_for_audio, ServerCommand,
+    ServerResponse, TranscriptionResult,
 };
 use crate::state::AppState;
 use crate::utils::AppError;
@@ -201,12 +202,16 @@ impl NativeStreamClient {
             return Err(stream_error("stream client is closed"));
         }
 
-        let response = send_command_to_server(
+        // 收尾会把整段音频一次性解码，耗时随录音长度线性增长；固定 60 秒按实测
+        // 19 倍实时只够二十来分钟，这里按已喂入的样本数换算时长交给调用方放宽预算。
+        let duration_sec = self.sample_count as f64 / 16_000.0;
+        let response = send_command_to_server_for_audio(
             state,
             &ServerCommand::StreamFinish {
                 session_id: self.session_id,
             },
             app,
+            Some(duration_sec),
         )
         .await;
         let mut response = match response {

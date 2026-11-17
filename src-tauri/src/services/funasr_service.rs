@@ -206,6 +206,17 @@ const SERVER_INIT_TIMEOUT_SECS: u64 = 120;
 // publishing readiness. A stale opt-in must not start an unwanted download.
 const AUDIO_PROCESSING_BOOTSTRAP_ENABLED: bool = false;
 const SERVER_RESPONSE_TIMEOUT_SECS: u64 = 60;
+/// 本地引擎实测约 19 倍实时。整段解码与流式收尾的耗时会随音频时长线性增长，
+/// 固定 60 秒按这个速率只够二十来分钟，机器慢一点就提前撞线，这里按 1/10 折算
+/// 并留固定余量。
+const LONG_AUDIO_SECS_PER_AUDIO_SEC: f64 = 0.1;
+const LONG_AUDIO_EXTRA_SECS: u64 = 120;
+/// 上限 15 分钟约覆盖 4 小时音频（按 19 倍实时），再长就该切分文件了。
+const LONG_AUDIO_MAX_TIMEOUT_SECS: u64 = 900;
+/// 短于该时长的输入使用原有 60 秒预算，避免实时流式小块被误伤。
+const LONG_AUDIO_MIN_DURATION_SECS: f64 = 30.0;
+/// 读取预算之外的余量，保证带音频时长的具体错误先于外层通用超时返回。
+const LONG_AUDIO_DEADLINE_GRACE_SECS: u64 = 5;
 const SERVER_EXIT_WRITE_TIMEOUT_MS: u64 = 300;
 const SERVER_EXIT_WAIT_TIMEOUT_SECS: u64 = 2;
 const INLINE_AUDIO_FORMAT_PCM_S16LE: &str = "pcm_s16le";
@@ -221,6 +232,70 @@ fn next_server_start_owner() -> u64 {
             return owner;
         }
     }
+}
+
+/// 按音频时长估算整段解码 / 流式收尾需要等待多久。
+///
+/// 短音频沿用原 60 秒预算，长音频按 1/10 实时折算并加固定余量，上限 15 分钟。
+fn long_audio_response_timeout(duration_sec: f64) -> Duration {
+    let needed = duration_sec * LONG_AUDIO_SECS_PER_AUDIO_SEC + LONG_AUDIO_EXTRA_SECS as f64;
+    let secs = needed
+        .ceil()
+        .max(SERVER_RESPONSE_TIMEOUT_SECS as f64)
+        .min(LONG_AUDIO_MAX_TIMEOUT_SECS as f64);
+    Duration::from_secs(secs as u64)
+}
+
+/// 超时文案里的人类可读时长，例如「37 分钟」「45 秒」。
+fn describe_audio_duration(duration_sec: f64) -> String {
+    if duration_sec >= 60.0 {
+        format!("{:.0} 分钟", duration_sec / 60.0)
+    } else {
+        format!("{:.0} 秒", duration_sec)
+    }
+}
+
+/// 需要放宽预算的音频时长与对应预算；`None` 表示沿用默认 60 秒。
+///
+/// 单独抽成纯函数，便于锁住「短音频与未知时长必须回退默认预算」这条回归线。
+fn long_audio_budget(audio_duration_sec: Option<f64>) -> Option<(f64, Duration)> {
+    let duration_sec = audio_duration_sec
+        .filter(|secs| secs.is_finite() && *secs >= LONG_AUDIO_MIN_DURATION_SECS)?;
+    Some((duration_sec, long_audio_response_timeout(duration_sec)))
+}
+
+/// 只用于决定提示文案与日志措辞，不参与重试或控制流；
+/// 因此这里按错误文案判断是可接受的，真要精确应给 `AppError` 加 `Timeout` 变体。
+fn is_timeout_error(error: &AppError) -> bool {
+    error.to_string().contains("超时")
+}
+
+/// 给超时错误补上音频时长与本次等待上限，避免只看到一句「超时」。
+fn decorate_timeout(
+    error: AppError,
+    audio_duration_sec: Option<f64>,
+    budget: Duration,
+) -> AppError {
+    let AppError::Asr(message) = error else {
+        return error;
+    };
+    if !message.contains("超时") {
+        return AppError::Asr(message);
+    }
+    let Some(duration_sec) = audio_duration_sec.filter(|secs| secs.is_finite()) else {
+        return AppError::Asr(message);
+    };
+    let hint = if budget.as_secs() >= LONG_AUDIO_MAX_TIMEOUT_SECS {
+        "，可先切分音频再重试"
+    } else {
+        ""
+    };
+    AppError::Asr(format!(
+        "{message}：音频约 {}，本次等待上限 {} 秒{}",
+        describe_audio_duration(duration_sec),
+        budget.as_secs(),
+        hint
+    ))
 }
 
 fn start_ticket_is_current(state: &AppState, ticket: &StartTicket) -> bool {
@@ -699,7 +774,9 @@ pub async fn transcribe_pcm16(
         return transcribe_pcm16_via_path(state, samples, sample_rate, hot_words, app_handle).await;
     }
 
-    let response = send_command_to_server(
+    let audio_duration_sec =
+        (sample_rate > 0).then(|| samples.len() as f64 / f64::from(sample_rate));
+    let response = send_command_to_server_for_audio(
         state,
         &ServerCommand::Transcribe {
             options: profile_r2t2_options(state),
@@ -710,6 +787,7 @@ pub async fn transcribe_pcm16(
             hot_words: hot_words.clone(),
         },
         Some(app_handle),
+        audio_duration_sec,
     )
     .await?;
 
@@ -834,12 +912,13 @@ async fn transcribe_wav_bytes_via_path(
     app_handle: &tauri::AppHandle,
 ) -> Result<TranscriptionResult, AppError> {
     let temp_file = create_temp_audio_path();
+    let audio_duration_sec = super::audio_service::wav_duration_secs(&audio_data);
 
     tokio::fs::write(&temp_file, &audio_data)
         .await
         .map_err(|e| AppError::Asr(format!("写入临时音频文件失败: {}", e)))?;
 
-    let response = send_command_to_server(
+    let response = send_command_to_server_for_audio(
         state,
         &ServerCommand::Transcribe {
             options: profile_r2t2_options(state),
@@ -850,6 +929,7 @@ async fn transcribe_wav_bytes_via_path(
             hot_words,
         },
         Some(app_handle),
+        audio_duration_sec,
     )
     .await;
 
@@ -899,12 +979,47 @@ async fn send_command_to_server<R: tauri::Runtime>(
     .await
 }
 
+/// 整段解码 / 流式收尾用：等待预算随音频时长放宽。
+///
+/// 时长未知或短于阈值时等价于 [`send_command_to_server`]，实时流式小块不受影响。
+async fn send_command_to_server_for_audio<R: tauri::Runtime>(
+    state: &AppState,
+    command: &ServerCommand,
+    app_handle: Option<&tauri::AppHandle<R>>,
+    audio_duration_sec: Option<f64>,
+) -> Result<ServerResponse, AppError> {
+    let Some((duration_sec, reply_budget)) = long_audio_budget(audio_duration_sec) else {
+        return send_command_to_server(state, command, app_handle).await;
+    };
+
+    send_command_to_server_inner(
+        state,
+        command,
+        app_handle,
+        reply_budget + Duration::from_secs(LONG_AUDIO_DEADLINE_GRACE_SECS),
+        reply_budget,
+        Some(duration_sec),
+    )
+    .await
+}
+
+/// 通信中断时释放进程的原因，决定日志与用户看到的提示。
+#[derive(Clone, Copy)]
+enum TransportFailure {
+    Disconnected,
+    Timeout {
+        audio_duration_sec: Option<f64>,
+        budget_secs: u64,
+    },
+}
+
 // The process stays outside the shared slot until its complete reply arrives.
 // Cancellation can leave a partial JSON frame, so only success restores it.
 struct CommandProcessGuard<'a, R: tauri::Runtime> {
     state: &'a AppState,
     app_handle: Option<&'a tauri::AppHandle<R>>,
     process: Option<FunasrProcess>,
+    failure: TransportFailure,
 }
 
 impl<R: tauri::Runtime> Drop for CommandProcessGuard<'_, R> {
@@ -912,7 +1027,25 @@ impl<R: tauri::Runtime> Drop for CommandProcessGuard<'_, R> {
         if self.process.is_none() {
             return;
         }
-        log::warn!("FunASR 通信中断，释放进程并准备重启");
+        let message = match self.failure {
+            TransportFailure::Disconnected => {
+                log::warn!("FunASR 通信中断，释放进程并准备重启");
+                "语音识别引擎连接已断开，正在准备重启..."
+            }
+            TransportFailure::Timeout {
+                audio_duration_sec,
+                budget_secs,
+            } => {
+                log::warn!(
+                    "FunASR 响应超时（音频约 {}，等待上限 {} 秒），释放进程并准备重启",
+                    audio_duration_sec
+                        .map(describe_audio_duration)
+                        .unwrap_or_else(|| "未知时长".to_string()),
+                    budget_secs
+                );
+                "语音识别响应超时，引擎已重置，正在准备重启..."
+            }
+        };
         self.state.set_funasr_ready(false);
         self.state.set_inline_audio_transport(None);
         if let Some(handle) = self.app_handle {
@@ -920,7 +1053,7 @@ impl<R: tauri::Runtime> Drop for CommandProcessGuard<'_, R> {
                 "funasr-status",
                 serde_json::json!({
                     "status": "crashed",
-                    "message": "语音识别引擎连接已断开，正在准备重启..."
+                    "message": message
                 }),
             );
         }
@@ -933,26 +1066,75 @@ async fn send_command_to_server_with_timeout<R: tauri::Runtime>(
     app_handle: Option<&tauri::AppHandle<R>>,
     timeout: Duration,
 ) -> Result<ServerResponse, AppError> {
+    send_command_to_server_inner(
+        state,
+        command,
+        app_handle,
+        timeout,
+        Duration::from_secs(SERVER_RESPONSE_TIMEOUT_SECS),
+        None,
+    )
+    .await
+}
+
+async fn send_command_to_server_inner<R: tauri::Runtime>(
+    state: &AppState,
+    command: &ServerCommand,
+    app_handle: Option<&tauri::AppHandle<R>>,
+    deadline: Duration,
+    reply_timeout: Duration,
+    audio_duration_sec: Option<f64>,
+) -> Result<ServerResponse, AppError> {
     // One budget covers waiting for the lock, write, flush, and the reply.
-    tokio::time::timeout(timeout, async {
-        let mut guard = state.engine.funasr_process.lock().await;
-        let process = guard
-            .take()
-            .ok_or_else(|| AppError::Asr("FunASR 进程未运行".to_string()))?;
-        let mut owned = CommandProcessGuard {
-            state,
-            app_handle,
-            process: Some(process),
-        };
-        let result = send_command_impl(owned.process.as_mut().unwrap(), command).await;
-        if result.is_ok() {
+    let started = Instant::now();
+    let mut guard = tokio::time::timeout(deadline, state.engine.funasr_process.lock())
+        .await
+        .map_err(|_| {
+            decorate_timeout(
+                AppError::Asr("等待 FunASR 命令完成超时".to_string()),
+                audio_duration_sec,
+                deadline,
+            )
+        })?;
+    let process = guard
+        .take()
+        .ok_or_else(|| AppError::Asr("FunASR 进程未运行".to_string()))?;
+    // 声明顺序是有意的：失败时 `owned` 必须先于 `guard` 析构，让进程在锁释放前
+    // 就被清掉；否则并发调用会先拿到空槽位并报「进程未运行」，而不是按断连处理。
+    let mut owned = CommandProcessGuard {
+        state,
+        app_handle,
+        process: Some(process),
+        failure: TransportFailure::Disconnected,
+    };
+
+    let remaining = deadline.checked_sub(started.elapsed()).unwrap_or_default();
+    let result = match tokio::time::timeout(
+        remaining,
+        send_command_impl_with_timeout(owned.process.as_mut().unwrap(), command, reply_timeout),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(AppError::Asr("等待 FunASR 命令完成超时".to_string())),
+    };
+
+    match result {
+        Ok(response) => {
             // A valid application error is still a healthy transport reply.
             *guard = owned.process.take();
+            Ok(response)
         }
-        result
-    })
-    .await
-    .map_err(|_| AppError::Asr("等待 FunASR 命令完成超时".to_string()))?
+        Err(error) => {
+            if is_timeout_error(&error) {
+                owned.failure = TransportFailure::Timeout {
+                    audio_duration_sec,
+                    budget_secs: reply_timeout.as_secs(),
+                };
+            }
+            Err(decorate_timeout(error, audio_duration_sec, reply_timeout))
+        }
+    }
 }
 
 /// 向子进程发送命令并读取响应的内部实现
@@ -961,6 +1143,20 @@ async fn send_command_to_server_with_timeout<R: tauri::Runtime>(
 async fn send_command_impl(
     process: &mut FunasrProcess,
     command: &ServerCommand,
+) -> Result<ServerResponse, AppError> {
+    send_command_impl_with_timeout(
+        process,
+        command,
+        Duration::from_secs(SERVER_RESPONSE_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// 同 [`send_command_impl`]，但由调用方指定读取响应的预算。
+async fn send_command_impl_with_timeout(
+    process: &mut FunasrProcess,
+    command: &ServerCommand,
+    reply_timeout: Duration,
 ) -> Result<ServerResponse, AppError> {
     let request_id = NEXT_SERVER_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let mut command_value = serde_json::to_value(command)
@@ -993,7 +1189,7 @@ async fn send_command_impl(
     // 从 stdout 读取响应（允许跳过非 JSON 行）
     read_json_response_matching(
         &mut process.stdout,
-        Duration::from_secs(SERVER_RESPONSE_TIMEOUT_SECS),
+        reply_timeout,
         "等待 FunASR 响应",
         |response: &ServerResponse| {
             server_response_matches_request(response.request_id, request_id)
@@ -1017,6 +1213,101 @@ mod request_identity_tests {
         assert!(!server_response_matches_request(None, 2));
         assert!(!server_response_matches_request(Some(1), 2));
         assert!(server_response_matches_request(Some(2), 2));
+    }
+}
+
+#[cfg(test)]
+mod long_audio_timeout_tests {
+    use super::{
+        decorate_timeout, describe_audio_duration, long_audio_budget, long_audio_response_timeout,
+        LONG_AUDIO_MAX_TIMEOUT_SECS,
+    };
+    use crate::utils::AppError;
+    use std::time::Duration;
+
+    #[test]
+    fn short_and_unknown_audio_keep_the_default_budget() {
+        // 实时流式的每包只有几秒到十几秒，绝不能因为这条公式被放宽或收紧。
+        assert!(long_audio_budget(None).is_none());
+        assert!(long_audio_budget(Some(0.2)).is_none());
+        assert!(long_audio_budget(Some(12.0)).is_none());
+        assert!(long_audio_budget(Some(29.9)).is_none());
+        assert!(long_audio_budget(Some(f64::NAN)).is_none());
+        assert!(long_audio_budget(Some(f64::INFINITY)).is_none());
+
+        let (duration_sec, budget) = long_audio_budget(Some(30.0)).expect("30 秒起才放宽");
+        assert_eq!(duration_sec, 30.0);
+        assert_eq!(budget.as_secs(), 123);
+    }
+
+    #[test]
+    fn long_audio_budget_is_capped_and_at_least_the_default() {
+        // 折算下限是固定余量 120 秒，且永不低于原 60 秒预算。
+        assert_eq!(long_audio_response_timeout(0.0).as_secs(), 120);
+        assert_eq!(long_audio_response_timeout(30.0).as_secs(), 123);
+        // 5 分钟 -> 30 + 120
+        assert_eq!(long_audio_response_timeout(300.0).as_secs(), 150);
+        // 37 分钟：实测约需 117 秒，343 秒留了约 3 倍余量。
+        assert_eq!(long_audio_response_timeout(2223.0).as_secs(), 343);
+        // 2 小时 -> 840，仍在增长区间内。
+        assert_eq!(long_audio_response_timeout(7200.0).as_secs(), 840);
+        // 4 小时以上统一封顶，提示用户切分。
+        assert_eq!(
+            long_audio_response_timeout(36_000.0).as_secs(),
+            LONG_AUDIO_MAX_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn timeout_error_mentions_audio_length_and_budget() {
+        let error = decorate_timeout(
+            AppError::Asr("等待 FunASR 响应超时".to_string()),
+            Some(2223.0),
+            Duration::from_secs(343),
+        );
+        assert_eq!(
+            error.to_string(),
+            "ASR错误: 等待 FunASR 响应超时：音频约 37 分钟，本次等待上限 343 秒"
+        );
+    }
+
+    #[test]
+    fn timeout_error_adds_a_hint_only_when_the_budget_is_capped() {
+        let error = decorate_timeout(
+            AppError::Asr("等待 FunASR 响应超时".to_string()),
+            Some(36_000.0),
+            Duration::from_secs(LONG_AUDIO_MAX_TIMEOUT_SECS),
+        );
+        assert!(
+            error.to_string().ends_with("可先切分音频再重试"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn non_timeout_errors_and_unknown_lengths_stay_untouched() {
+        let transport = decorate_timeout(
+            AppError::Asr("写入命令到 FunASR 失败: broken pipe".to_string()),
+            Some(2223.0),
+            Duration::from_secs(343),
+        );
+        assert_eq!(
+            transport.to_string(),
+            "ASR错误: 写入命令到 FunASR 失败: broken pipe"
+        );
+
+        let unknown = decorate_timeout(
+            AppError::Asr("等待 FunASR 响应超时".to_string()),
+            None,
+            Duration::from_secs(60),
+        );
+        assert_eq!(unknown.to_string(), "ASR错误: 等待 FunASR 响应超时");
+    }
+
+    #[test]
+    fn durations_are_rendered_in_minutes_only_when_long_enough() {
+        assert_eq!(describe_audio_duration(45.0), "45 秒");
+        assert_eq!(describe_audio_duration(2223.0), "37 分钟");
     }
 }
 
