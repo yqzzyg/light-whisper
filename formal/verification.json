@@ -523,7 +523,25 @@
     "commands::notes::move_note": [
       "notes"
     ],
+    "commands::notes::create_note_from_history": [
+      "notes"
+    ],
     "commands::notes::save_text_file": [
+      "notes"
+    ],
+    "commands::note_recording::start_note_recording": [
+      "notes"
+    ],
+    "commands::note_recording::stop_note_recording": [
+      "notes"
+    ],
+    "commands::note_recording::cancel_note_recording": [
+      "notes"
+    ],
+    "commands::note_recording::get_note_recording_state": [
+      "notes"
+    ],
+    "commands::note_transcription::transcribe_note_recording": [
       "notes"
     ]
   },
@@ -549,6 +567,9 @@
     ],
     "history-updated": [
       "history"
+    ],
+    "note-recording-state": [
+      "notes"
     ],
     "hotkey-diagnostic": [
       "hotkeys"
@@ -1926,7 +1947,7 @@
       "assumptions": "Two contexts and two abstract K/vocabulary keys; four-column requests only, two calls per context for policy and three across at most two lifetimes for restart. One eligible application head per backend context; serialized synchronous application commands and idle-lock exclusion. Actual stock-kernel/device/layout guards narrow eligibility. Other column counts retain their actual scalar shape outside this model. Calibration effects/ticks are conservative abstract observations; native parity rejection skips timing. First-input parity is not all-input arithmetic proof. No compiler/driver refinement, unrestricted concurrent C ABI calls, universal GPU validation or performance proof."
     },
     "notes": {
-      "obligation": "Notes and note folders persist in an independent SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes.",
+      "obligation": "Notes and note folders persist in an independent SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes. Creating a note from a history record copies its transcript, duration and history id, never the audio, and stays idempotent per history record so repeated clicks yield one note. Meeting recording appends 16 kHz mono PCM to a placeholder-headed WAV at least twice a second, so a long session survives a crash with at most one flush interval lost; the header is backfilled on stop and repaired on the next startup before unreferenced files are removed. Only one recording session exists at a time, it refuses to start while dictation holds the microphone, and the recording file is deleted together with its note. Transcribing a recording hands the stored file path to the engine without copying the audio, writes at most one history record that carries no audio reference, and stays idempotent per note: a note that already has a transcript returns immediately, and a second concurrent transcription is refused instead of running the engine twice.",
       "models": {
         "HistoryRecords": [
           "DeleteTransactionIsAtomic"
@@ -1934,7 +1955,11 @@
       },
       "implementation": [
         "src-tauri/src/services/notes_service.rs",
-        "src-tauri/src/commands/notes.rs"
+        "src-tauri/src/commands/notes.rs",
+        "src-tauri/src/services/note_recording_service.rs",
+        "src-tauri/src/services/wav_writer.rs",
+        "src-tauri/src/services/transcription_service.rs",
+        "src-tauri/src/commands/note_transcription.rs"
       ],
       "evidence": [
         "src-tauri/src/services/notes_service.rs#deleting_a_folder_unfiles_its_notes_without_touching_others",
@@ -1942,7 +1967,19 @@
         "src-tauri/src/services/notes_service.rs#pagination_reports_total_and_has_more",
         "src-tauri/src/services/notes_service.rs#underscore_in_query_is_a_literal_not_a_wildcard",
         "src-tauri/src/services/notes_service.rs#update_note_only_touches_supplied_fields",
-        "src-tauri/src/commands/notes.rs#export_file_name_keeps_only_the_last_segment"
+        "src-tauri/src/commands/notes.rs#export_file_name_keeps_only_the_last_segment",
+        "src-tauri/src/services/notes_service.rs#note_from_history_carries_transcript_and_duration",
+        "src-tauri/src/services/notes_service.rs#note_from_history_is_idempotent_per_history_record",
+        "src-tauri/src/commands/notes.rs#note_title_comes_from_the_first_content_line",
+        "src-tauri/src/services/wav_writer.rs#repair_header_backfills_an_interrupted_recording",
+        "src-tauri/src/services/wav_writer.rs#appended_samples_are_readable_after_finish",
+        "src-tauri/src/services/note_recording_service.rs#drain_appends_pending_samples_and_publishes_peak_level",
+        "src-tauri/src/services/note_recording_service.rs#snapshot_is_idle_without_a_session",
+        "src-tauri/src/services/notes_service.rs#audio_file_names_lists_only_referenced_recordings",
+        "src-tauri/src/services/notes_service.rs#set_audio_records_duration_without_touching_transcript",
+        "src-tauri/src/commands/note_transcription.rs#note_history_keeps_the_audio_out_of_the_history_table",
+        "src-tauri/src/state/app_state.rs#a_second_transcription_is_rejected_while_one_runs",
+        "src-tauri/src/services/transcription_service.rs#local_engines_are_everything_but_the_two_online_ones"
       ],
       "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. notes.sqlite3 is independent of the history database and never shares its audio GC or lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. The model bounds one folder and two notes; it is not a refinement of the Rust source."
     }
@@ -3421,6 +3458,12 @@
     "commands::notes::update_note": "src-tauri/src/commands/notes.rs#fn update_note(",
     "commands::notes::delete_note": "src-tauri/src/commands/notes.rs#fn delete_note(",
     "commands::notes::move_note": "src-tauri/src/commands/notes.rs#fn move_note(",
-    "commands::notes::save_text_file": "src-tauri/src/commands/notes.rs#pub async fn save_text_file("
+    "commands::notes::create_note_from_history": "src-tauri/src/commands/notes.rs#pub async fn create_note_from_history(",
+    "commands::notes::save_text_file": "src-tauri/src/commands/notes.rs#pub async fn save_text_file(",
+    "commands::note_recording::start_note_recording": "src-tauri/src/commands/note_recording.rs#pub async fn start_note_recording(",
+    "commands::note_recording::stop_note_recording": "src-tauri/src/commands/note_recording.rs#pub async fn stop_note_recording(",
+    "commands::note_recording::cancel_note_recording": "src-tauri/src/commands/note_recording.rs#pub async fn cancel_note_recording(",
+    "commands::note_recording::get_note_recording_state": "src-tauri/src/commands/note_recording.rs#pub fn get_note_recording_state(",
+    "commands::note_transcription::transcribe_note_recording": "src-tauri/src/commands/note_transcription.rs#pub async fn transcribe_note_recording("
   }
 }

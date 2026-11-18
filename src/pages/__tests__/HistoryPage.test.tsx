@@ -12,6 +12,10 @@ const api = vi.hoisted(() => ({
   listTranscriptionHistory: vi.fn(),
   reprocessTranscriptionHistory: vi.fn(),
   revealHistoryAudio: vi.fn(),
+  // 「存为笔记」会经 notesStore 刷新目录与列表
+  createNoteFromHistory: vi.fn(),
+  listNoteFolders: vi.fn(),
+  listNotes: vi.fn(),
 }));
 
 const event = vi.hoisted(() => ({ listen: vi.fn() }));
@@ -63,6 +67,9 @@ vi.mock("react-i18next", () => ({
       "historyPage.reprocessAsr": "使用当前引擎重新识别",
       "historyPage.openAudioFolder": "打开录音所在文件夹",
       "historyPage.reprocessDone": "已生成新的历史记录",
+      "historyPage.saveToNotes": "存为笔记",
+      "historyPage.saveToNotesDone": "已存为笔记，可在左侧「笔记」中查看",
+      "historyPage.saveToNotesFailed": `存为笔记失败：${options?.error ?? ""}`,
       "historyPage.reprocessPolish": "使用当前模型重新润色",
       "historyPage.searchPlaceholder": "搜索文本、应用或窗口…",
       "historyPage.showDetails": "查看详情",
@@ -122,6 +129,9 @@ beforeEach(() => {
   });
   api.reprocessTranscriptionHistory.mockResolvedValue(record);
   api.deleteTranscriptionHistory.mockResolvedValue(true);
+  api.listNoteFolders.mockResolvedValue([]);
+  api.listNotes.mockResolvedValue({ items: [], total: 0, hasMore: false });
+  api.createNoteFromHistory.mockResolvedValue({ id: 9, folderId: null });
 });
 
 describe("HistoryPage", () => {
@@ -450,6 +460,30 @@ describe("HistoryPage", () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalled();
     });
+  });
+
+  it("saves a record as a note and opens the notes page", async () => {
+    const onNavigate = vi.fn();
+    render(<HistoryPage onNavigate={onNavigate} />);
+    await screen.findByText("润色后的最终文本");
+
+    fireEvent.click(screen.getByRole("button", { name: "存为笔记" }));
+
+    await waitFor(() => expect(api.createNoteFromHistory).toHaveBeenCalledWith(7));
+    expect(toast.success).toHaveBeenCalled();
+    expect(onNavigate).toHaveBeenCalledWith("notes");
+  });
+
+  it("keeps the user on the history page when saving as a note fails", async () => {
+    api.createNoteFromHistory.mockRejectedValue(new Error("这条记录没有转写文本，无法存为笔记"));
+    const onNavigate = vi.fn();
+    render(<HistoryPage onNavigate={onNavigate} />);
+    await screen.findByText("润色后的最终文本");
+
+    fireEvent.click(screen.getByRole("button", { name: "存为笔记" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 
   it("shows both the edit instruction and selected source text", async () => {

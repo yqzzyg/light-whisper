@@ -276,13 +276,19 @@ export type PersistentHistoryStatus =
   | "processing_error"
   | "no_speech";
 
+/**
+ * 历史行的 `mode`。听写/助手之外，还有导入音频（`import`）与笔记转写（`note`），
+ * 后两者由后端写入，不走录音状态机。
+ */
+export type HistoryMode = RecordingMode | "import" | "note";
+
 export interface PersistentHistoryRecord {
   id: number;
   sessionId: number;
   createdAt: number;
   updatedAt: number;
-  mode: RecordingMode;
-  workflow: "dictation" | "assistant" | "edit" | "import";
+  mode: HistoryMode;
+  workflow: "dictation" | "assistant" | "edit" | "import" | "note";
   status: PersistentHistoryStatus;
   text: string;
   originalText: string;

@@ -695,6 +695,36 @@ pub async fn transcribe(
     transcribe_wav_bytes_via_path(state, audio_data, hot_words, app_handle).await
 }
 
+/// 直接对磁盘上的 WAV 转写：不读进内存、不写临时副本。
+///
+/// 会议录音本来就以 16k 单声道 WAV 落盘（一小时约 115MB），走
+/// [`transcribe`] 会先整段读进内存再写一份临时文件，白白多一次上百兆的拷贝。
+/// 预算与超时沿用 [`send_command_to_server_for_audio`]，与导入转写同一条曲线。
+pub async fn transcribe_path(
+    state: &AppState,
+    audio_path: &std::path::Path,
+    duration_sec: Option<f64>,
+    app_handle: &tauri::AppHandle,
+) -> Result<TranscriptionResult, AppError> {
+    let _asr_guard = state.engine.native_asr_owner.lock().await;
+    let hot_words = profile_hot_words(state);
+    let response = send_command_to_server_for_audio(
+        state,
+        &ServerCommand::Transcribe {
+            options: profile_r2t2_options(state),
+            audio_path: Some(audio_path.to_string_lossy().to_string()),
+            audio_base64: None,
+            audio_format: None,
+            sample_rate: None,
+            hot_words,
+        },
+        Some(app_handle),
+        duration_sec,
+    )
+    .await?;
+    Ok(server_response_to_transcription_result(state, response))
+}
+
 /// Exercise the selected local model without recording, history or private hot words.
 pub(crate) async fn probe_model(
     state: &AppState,

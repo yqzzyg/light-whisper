@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import {
   createNote as apiCreateNote,
   createNoteFolder as apiCreateNoteFolder,
+  createNoteFromHistory as apiCreateNoteFromHistory,
   deleteNote as apiDeleteNote,
   deleteNoteFolder as apiDeleteNoteFolder,
   getNote,
@@ -213,6 +214,27 @@ export function closeNote(): void {
   emit({ selectedNoteId: null, note: null, loadingNote: false });
 }
 
+/**
+ * 重新读取当前打开的笔记，不显示加载骨架。
+ *
+ * 用于后端改了笔记而前端不知情的场景（停止录音后回填 audioFile/duration、
+ * 转写完成写回转录）。先 flush 待保存的编辑，否则这次重读会把刚敲的字覆盖掉。
+ */
+export async function reloadOpenNote(): Promise<void> {
+  const id = state.selectedNoteId;
+  if (id == null) return;
+  await flushNoteSave();
+  const token = ++noteToken;
+  try {
+    const note = await getNote(id);
+    if (token !== noteToken || state.selectedNoteId !== id) return;
+    emit({ note });
+  } catch (error) {
+    // 重读失败不影响当前展示，下次打开会重新拉。
+    console.warn("刷新笔记失败:", messageOf(error));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 写入
 // ---------------------------------------------------------------------------
@@ -314,6 +336,27 @@ export async function createNote(folderId: number | null): Promise<void> {
   } catch (error) {
     emit({ error: messageOf(error) });
   }
+}
+
+/**
+ * 历史 / 上传记录存为笔记：转录随笔记走，音频仍归历史记录。
+ *
+ * 直接切到这条笔记：用户点「存为笔记」的意图就是去看它。这里不吞异常，
+ * 调用方需要把后端文案（「这条记录没有转写文本」）原样告诉用户。
+ */
+export async function createNoteFromHistory(historyId: number): Promise<NoteDetail> {
+  await flushNoteSave();
+  const note = await apiCreateNoteFromHistory(historyId);
+  await Promise.all([refreshFolders(), refreshNotes(true)]);
+  emit({
+    selectedNoteId: note.id,
+    note,
+    activeFolderId: note.folderId,
+    collapsedFolderIds: expandFolder(state.collapsedFolderIds, note.folderId),
+    loadingNote: false,
+    error: null,
+  });
+  return note;
 }
 
 export async function moveNote(id: number, folderId: number | null): Promise<void> {

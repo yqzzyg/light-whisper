@@ -12,10 +12,12 @@ const api = vi.hoisted(() => ({
   updateNote: vi.fn(),
   deleteNote: vi.fn(),
   moveNote: vi.fn(),
+  createNoteFromHistory: vi.fn(),
 }));
 vi.mock("@/api/tauri", () => api);
 
 import {
+  createNoteFromHistory,
   editNote,
   ensureNotesLoaded,
   flushNoteSave,
@@ -194,5 +196,33 @@ describe("notesStore", () => {
     expect(getNotesSnapshot().selectedNoteId).toBeNull();
     expect(getNotesSnapshot().note).toBeNull();
     expect(api.listNotes).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the note created from a history record and refreshes the list", async () => {
+    await ensureNotesLoaded();
+    api.createNoteFromHistory.mockResolvedValue({
+      ...detail(9, "周会纪要"),
+      transcript: "第一段",
+      historyId: 42,
+      kind: "import",
+    });
+
+    const note = await createNoteFromHistory(42);
+
+    expect(api.createNoteFromHistory).toHaveBeenCalledWith(42);
+    expect(note.id).toBe(9);
+    // 存完直接切过去：用户的意图就是看这条笔记
+    expect(getNotesSnapshot().selectedNoteId).toBe(9);
+    expect(getNotesSnapshot().note?.historyId).toBe(42);
+    // 列表也要刷，否则侧栏里看不到新笔记
+    expect(api.listNotes).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces the backend message instead of swallowing a failed save-as-note", async () => {
+    await ensureNotesLoaded();
+    api.createNoteFromHistory.mockRejectedValue(new Error("这条记录没有转写文本，无法存为笔记"));
+
+    await expect(createNoteFromHistory(42)).rejects.toThrow("没有转写文本");
+    expect(getNotesSnapshot().selectedNoteId).toBeNull();
   });
 });

@@ -2,9 +2,7 @@ use std::time::Instant;
 
 use tauri::Emitter;
 
-use crate::services::{
-    ai_polish_service, alibaba_asr_service, funasr_service, glm_asr_service, history_service,
-};
+use crate::services::{ai_polish_service, funasr_service, history_service, transcription_service};
 use crate::state::AppState;
 use crate::utils::{foreground, paths};
 
@@ -155,37 +153,13 @@ pub async fn export_transcription_history(
     Ok(Some(paths::strip_win_prefix(path.path())))
 }
 
-/// 按当前引擎配置把 WAV 字节分发给对应 ASR 服务。
-///
-/// 供历史重识别与导入转写共用，避免两处重复引擎分发逻辑。
-/// `error_prefix` 用于区分调用场景的错误文案。
-pub(crate) async fn transcribe_wav_bytes_dispatched(
-    app_handle: &tauri::AppHandle,
-    state: &AppState,
-    audio: Vec<u8>,
-    error_prefix: &str,
-) -> Result<funasr_service::TranscriptionResult, String> {
-    let engine = paths::read_engine_config();
-    let result = match engine.as_str() {
-        "alibaba-asr" => alibaba_asr_service::transcribe(state, audio).await,
-        "glm-asr" => glm_asr_service::transcribe(state, audio).await,
-        _ => funasr_service::transcribe(state, audio, app_handle).await,
-    }
-    .map_err(|error| format!("{error_prefix}: {error}"))?;
-    if result.success {
-        Ok(result)
-    } else {
-        Err(result.error.unwrap_or_else(|| error_prefix.to_string()))
-    }
-}
-
 async fn transcribe_saved_audio(
     app_handle: &tauri::AppHandle,
     state: &AppState,
     audio_file: &str,
 ) -> Result<funasr_service::TranscriptionResult, String> {
     let audio = history_service::read_audio(audio_file).await?;
-    transcribe_wav_bytes_dispatched(app_handle, state, audio, "重新识别失败").await
+    transcription_service::transcribe_wav_bytes(app_handle, state, audio, "重新识别失败").await
 }
 
 fn ensure_reprocessable_workflow(workflow: &str) -> Result<(), String> {

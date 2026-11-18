@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { ArrowLeft, FileAudio, LoaderCircle, Minus, Upload, X } from "lucide-react";
+import { ArrowLeft, FileAudio, LoaderCircle, Minus, NotebookPen, Upload, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { copyToClipboard, hideMainWindow } from "@/api/tauri";
 import TitleBar from "@/components/TitleBar";
 import TranscriptionResult from "@/components/TranscriptionResult";
 import { useAudioImport } from "@/hooks/useAudioImport";
+import { createNoteFromHistory } from "@/hooks/notesStore";
 
-type View = "main" | "settings" | "history" | "upload";
+type View = "main" | "settings" | "history" | "upload" | "notes";
 
 export default function UploadPage({
   onNavigate,
@@ -48,6 +49,18 @@ export default function UploadPage({
       toast.error(t("common.copyFailed"));
     }
   }, [t]);
+
+  /** 存为笔记：导入结果已写入历史，笔记只带走转录与时长，然后直接跳过去。 */
+  const handleSaveAsNote = useCallback(async () => {
+    if (!result) return;
+    try {
+      await createNoteFromHistory(result.id);
+      toast.success(t("upload.saveToNotesDone"));
+      onNavigate("notes");
+    } catch (error) {
+      toast.error(t("upload.saveToNotesFailed", { error: error instanceof Error ? error.message : String(error) }));
+    }
+  }, [onNavigate, result, t]);
 
   return (
     <div className={`page-root upload-page ${animClass}`}>
@@ -110,6 +123,12 @@ export default function UploadPage({
             <p className="upload-result-hint">
               {t(isStreaming ? "upload.streamingHint" : "upload.resultHint")}
             </p>
+            {finalResult && (
+              <button type="button" className="upload-save-note-btn" onClick={() => void handleSaveAsNote()}>
+                <NotebookPen size={13} aria-hidden="true" />
+                <span>{t("upload.saveToNotes")}</span>
+              </button>
+            )}
           </div>
         )}
       </div>

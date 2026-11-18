@@ -165,4 +165,21 @@ describe("NotesSidebar", () => {
     fireEvent.click(screen.getByText("notes.loadMore"));
     expect(props.onLoadMore).toHaveBeenCalled();
   });
+
+  it("marks recordings that still wait for a transcript", () => {
+    setup({
+      notes: [
+        { ...note(5, "待转写", null), hasAudio: true, hasTranscript: false },
+        { ...note(6, "已转写", null), hasAudio: true, hasTranscript: true },
+        { ...note(7, "纯文字", null), hasAudio: false, hasTranscript: true },
+      ],
+      total: 3,
+    });
+    const dots = Array.from(document.querySelectorAll(".notes-note-dot"));
+    expect(dots).toHaveLength(2);
+    expect(dots[0].getAttribute("data-pending")).toBe("true");
+    expect(dots[0].getAttribute("title")).toBe("notes.audioNotTranscribed");
+    expect(dots[1].getAttribute("data-pending")).toBe("false");
+    expect(dots[1].getAttribute("title")).toBe("notes.hasAudio");
+  });
 });

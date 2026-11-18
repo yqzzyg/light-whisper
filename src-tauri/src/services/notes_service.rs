@@ -669,6 +669,19 @@ fn set_transcript_with_connection(
     get_note_with_connection(connection, id)
 }
 
+fn find_note_by_history_with_connection(
+    connection: &Connection,
+    history_id: i64,
+) -> Result<Option<NoteDetail>, String> {
+    let sql = format!(
+        "SELECT {DETAIL_COLUMNS} FROM notes n WHERE n.history_id = ?1 ORDER BY n.id LIMIT 1"
+    );
+    connection
+        .query_row(&sql, params![history_id], detail_from_row)
+        .optional()
+        .map_err(|error| format!("读取笔记失败: {error}"))
+}
+
 fn set_audio_with_connection(
     connection: &Connection,
     id: i64,
@@ -766,6 +779,37 @@ pub async fn get_note(id: i64) -> Result<Option<NoteDetail>, String> {
     .map_err(|error| format!("读取笔记任务失败: {error}"))?
 }
 
+/// 所有被笔记引用的音频文件名。
+///
+/// 只给启动清理用：录音目录里不在这份集合中的文件就是没人认领的残留。
+pub async fn audio_file_names() -> Result<std::collections::HashSet<String>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        audio_file_names_with_connection(&connection)
+    })
+    .await
+    .map_err(|error| format!("查询笔记录音引用任务失败: {error}"))?
+}
+
+fn audio_file_names_with_connection(
+    connection: &Connection,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT audio_file FROM notes WHERE audio_file IS NOT NULL")
+        .map_err(|error| format!("准备查询笔记录音引用失败: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, Option<String>>(0))
+        .map_err(|error| format!("查询笔记录音引用失败: {error}"))?;
+    let mut names = std::collections::HashSet::new();
+    for row in rows {
+        if let Some(name) = row.map_err(|error| format!("解析笔记录音引用失败: {error}"))? {
+            names.insert(name);
+        }
+    }
+    Ok(names)
+}
+
 pub async fn create_note(
     folder_id: Option<i64>,
     title: &str,
@@ -817,9 +861,7 @@ pub async fn delete_note(id: i64) -> Result<Option<String>, String> {
 
 /// 用转录覆盖笔记的转录与时长，并挂上历史记录 ID。
 ///
-/// 只由转写流程调用；`history_id` 传 `None` 表示保持原值不变。
-// 转写链路（P3）落地前还没有调用方，先保留接口与单测，避免下一步改表。
-#[allow(dead_code)]
+/// 只由转写流程（`note_transcription`）调用；`history_id` 传 `None` 表示保持原值不变。
 pub async fn set_transcript(
     id: i64,
     transcript: &str,
@@ -837,8 +879,6 @@ pub async fn set_transcript(
 }
 
 /// 记录录音结果（录音模块使用）：只写文件名与时长，不动转录。
-// 同 `set_transcript`：录音链路（P3）落地前没有调用方。
-#[allow(dead_code)]
 pub async fn set_audio(
     id: i64,
     audio_file: Option<&str>,
@@ -852,6 +892,62 @@ pub async fn set_audio(
     })
     .await
     .map_err(|error| format!("保存笔记录音任务失败: {error}"))?
+}
+
+fn create_note_from_transcript_with_connection(
+    connection: &Connection,
+    folder_id: Option<i64>,
+    title: &str,
+    kind: &str,
+    transcript: &str,
+    duration_sec: Option<f64>,
+    history_id: i64,
+) -> Result<(NoteDetail, bool), String> {
+    if let Some(existing) = find_note_by_history_with_connection(connection, history_id)? {
+        return Ok((existing, false));
+    }
+    let created = insert_note_with_connection(connection, folder_id, title, kind)?;
+    let detail = set_transcript_with_connection(
+        connection,
+        created.id,
+        transcript,
+        duration_sec,
+        Some(history_id),
+    )?
+    .ok_or_else(|| "写入笔记转录失败：笔记不存在".to_string())?;
+    Ok((detail, true))
+}
+
+/// 从历史记录生成笔记：建笔记 + 写转录在同一次连接内完成，避免半成品。
+///
+/// 同一条历史记录重复调用返回已有笔记（第二个返回值为 `false`），连点不会
+/// 产生多条重复笔记。音频不复制，由 `history_id` 反向引用历史记录。
+pub async fn create_note_from_transcript(
+    folder_id: Option<i64>,
+    title: &str,
+    kind: &str,
+    transcript: &str,
+    duration_sec: Option<f64>,
+    history_id: i64,
+) -> Result<(NoteDetail, bool), String> {
+    initialize().await?;
+    let title = title.to_string();
+    let kind = kind.to_string();
+    let transcript = transcript.to_string();
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        create_note_from_transcript_with_connection(
+            &connection,
+            folder_id,
+            &title,
+            &kind,
+            &transcript,
+            duration_sec,
+            history_id,
+        )
+    })
+    .await
+    .map_err(|error| format!("创建笔记任务失败: {error}"))?
 }
 
 #[cfg(test)]
@@ -1114,6 +1210,40 @@ mod tests {
     }
 
     #[test]
+    fn audio_file_names_lists_only_referenced_recordings() {
+        let connection = memory_connection();
+        let with_audio = insert_note_with_connection(&connection, None, "有录音", "meeting").unwrap();
+        let without_audio = insert_note_with_connection(&connection, None, "无录音", "personal").unwrap();
+        set_audio_with_connection(&connection, with_audio.id, Some("note-1-2.wav"), Some(12.5))
+            .unwrap();
+
+        let names = audio_file_names_with_connection(&connection).unwrap();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("note-1-2.wav"));
+        assert!(!names.iter().any(|name| name.is_empty()));
+
+        // 删掉唯一的引用后集合必须为空，否则启动清理不敢删任何文件。
+        delete_note_with_connection(&connection, with_audio.id).unwrap();
+        assert!(audio_file_names_with_connection(&connection).unwrap().is_empty());
+        assert!(get_note_with_connection(&connection, without_audio.id)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn set_audio_records_duration_without_touching_transcript() {
+        let connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
+        set_transcript_with_connection(&connection, note.id, "已有转录", None, None).unwrap();
+        let updated = set_audio_with_connection(&connection, note.id, Some("a.wav"), Some(61.5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.audio_file.as_deref(), Some("a.wav"));
+        assert_eq!(updated.duration_sec, Some(61.5));
+        assert_eq!(updated.transcript.as_deref(), Some("已有转录"));
+    }
+
+    #[test]
     fn rename_folder_rejects_duplicates_but_allows_itself() {
         let connection = memory_connection();
         let folder = insert_folder_with_connection(&connection, "会议").unwrap();
@@ -1122,5 +1252,50 @@ mod tests {
         let renamed = rename_folder_with_connection(&connection, folder.id, "会议纪要").unwrap();
         assert_eq!(renamed.name, "会议纪要");
         assert!(rename_folder_with_connection(&connection, 999, "任意").is_err());
+    }
+
+    #[test]
+    fn note_from_history_carries_transcript_and_duration() {
+        let connection = memory_connection();
+        let folder = insert_folder_with_connection(&connection, "会议").unwrap();
+        let (note, created) = create_note_from_transcript_with_connection(
+            &connection,
+            Some(folder.id),
+            "周会",
+            "import",
+            "第一段\n\n第二段",
+            Some(1830.5),
+            42,
+        )
+        .unwrap();
+
+        assert!(created);
+        assert_eq!(note.title, "周会");
+        assert_eq!(note.kind, "import");
+        assert_eq!(note.folder_id, Some(folder.id));
+        assert_eq!(note.transcript.as_deref(), Some("第一段\n\n第二段"));
+        assert_eq!(note.duration_sec, Some(1830.5));
+        assert_eq!(note.history_id, Some(42));
+        assert!(note.content.is_empty());
+    }
+
+    /// 连点两次「存为笔记」不能产生两条笔记，第二次返回已有那条。
+    #[test]
+    fn note_from_history_is_idempotent_per_history_record() {
+        let connection = memory_connection();
+        let (first, created) = create_note_from_transcript_with_connection(
+            &connection, None, "周会", "import", "转录", None, 7,
+        )
+        .unwrap();
+        let (second, created_again) = create_note_from_transcript_with_connection(
+            &connection, None, "周会", "import", "转录", None, 7,
+        )
+        .unwrap();
+
+        assert!(created);
+        assert!(!created_again);
+        assert_eq!(first.id, second.id);
+        let page = list_notes_with_connection(&connection, &query(None, false, "")).unwrap();
+        assert_eq!(page.total, 1);
     }
 }

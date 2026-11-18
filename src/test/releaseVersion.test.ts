@@ -21,26 +21,32 @@ function readTomlString(relativePath: string, key: string): string {
   return match[1];
 }
 
-function readUvProjectVersion(): string {
-  const content = readRepoFile("uv.lock");
+/**
+ * 锁文件里的根包名来自各自的清单（Cargo package name / pyproject name），
+ * 这里跟着清单读，不再写死 —— 产品更名时少一处必改的字符串。
+ */
+function readLockProjectVersion(
+  lockPath: string,
+  manifestPath: string,
+  manifestLabel: string,
+): string {
+  const packageName = readTomlString(manifestPath, "name");
+  const content = readRepoFile(lockPath);
   const match = content.match(
-    /\[\[package\]\]\r?\nname = "light-whisper"\r?\nversion = "([^"]+)"/,
+    new RegExp(`\\[\\[package\\]\\]\\r?\\nname = "${packageName}"\\r?\\nversion = "([^"]+)"`),
   );
   if (!match) {
-    throw new Error("uv.lock is missing the light-whisper root package");
+    throw new Error(`${lockPath} is missing the ${packageName} root package from ${manifestLabel}`);
   }
   return match[1];
 }
 
+function readUvProjectVersion(): string {
+  return readLockProjectVersion("uv.lock", "pyproject.toml", "pyproject.toml");
+}
+
 function readCargoLockProjectVersion(): string {
-  const content = readRepoFile("src-tauri/Cargo.lock");
-  const match = content.match(
-    /\[\[package\]\]\r?\nname = "light-whisper"\r?\nversion = "([^"]+)"/,
-  );
-  if (!match) {
-    throw new Error("src-tauri/Cargo.lock is missing the light-whisper root package");
-  }
-  return match[1];
+  return readLockProjectVersion("src-tauri/Cargo.lock", "src-tauri/Cargo.toml", "Cargo.toml");
 }
 
 describe("release metadata", () => {

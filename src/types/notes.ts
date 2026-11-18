@@ -61,3 +61,21 @@ export interface NotePatch {
   title?: string;
   content?: string;
 }
+
+/**
+ * 会议录音状态，与后端 `NoteRecordingSnapshot` 一一对应。
+ *
+ * 录音期间后端每 500ms 推一次 `note-recording-state`；停止/取消时最后一个
+ * 事件里 `active` 为 false，并带上 `audioFile`/`durationSec`。
+ */
+export interface NoteRecordingSnapshot {
+  active: boolean;
+  sessionId: number | null;
+  noteId: number | null;
+  elapsedSec: number;
+  /** 0.0–1.0 的峰值电平，仅用于画电平条。 */
+  level: number;
+  audioFile: string | null;
+  durationSec: number | null;
+  error: string | null;
+}

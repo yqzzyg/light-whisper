@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 use std::thread::JoinHandle;
@@ -578,9 +578,63 @@ impl EngineState {
 pub struct AppState {
     pub engine: EngineState,
     pub recording: RecordingState,
+    /// 会议录音（笔记录音）会话。与 `recording` 分开：听写是「说完就转」的短会话，
+    /// 会议录音长达数小时、只落盘不转写，两套生命周期不能共用一把锁。
+    pub note_capture: NoteCaptureState,
+    /// 笔记转写占位。与 `note_capture` 分开：录音结束才有转写，生命周期不重叠。
+    pub note_transcription: NoteTranscriptionState,
     pub profile: ProfileState,
     pub ui: UiState,
     pub http_client: reqwest::Client,
+}
+
+/// 会议录音的互斥占位：`Some` 表示正在录，同一时刻只允许一个会话。
+#[derive(Default)]
+pub struct NoteCaptureState {
+    pub session: Arc<parking_lot::Mutex<Option<crate::services::note_recording_service::NoteCapture>>>,
+    /// 启动中的占位。`session` 的检查与写入之间隔着 `await`（起麦克风、建文件），
+    /// 连点两次会让两个会话都通过检查，所以用原子位把这段窗口也一并挡住。
+    pub starting: AtomicBool,
+}
+
+/// 笔记转写的互斥占位：同一时刻只允许一条笔记在转写。
+///
+/// 转写与历史写入之间隔着一次可能长达几分钟的 ASR，连点「转文字」会让两次调用
+/// 都跑完整段音频、各写一条历史。值 0 表示空闲，其余是正在转写的笔记 id。
+#[derive(Default)]
+pub struct NoteTranscriptionState {
+    note_id: AtomicI64,
+}
+
+/// 转写占位的作用域守卫：转写结束（含 panic 与提前返回）时自动释放。
+pub struct NoteTranscriptionGuard<'a> {
+    state: &'a NoteTranscriptionState,
+}
+
+impl Drop for NoteTranscriptionGuard<'_> {
+    fn drop(&mut self) {
+        self.state.note_id.store(0, Ordering::Release);
+    }
+}
+
+impl NoteTranscriptionState {
+    /// 占用转写位；已有笔记在转写时返回 `None`。
+    pub fn try_begin(&self, note_id: i64) -> Option<NoteTranscriptionGuard<'_>> {
+        if note_id <= 0 {
+            return None;
+        }
+        self.note_id
+            .compare_exchange(0, note_id, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(NoteTranscriptionGuard { state: self })
+    }
+
+    pub fn active_note(&self) -> Option<i64> {
+        match self.note_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        }
+    }
 }
 
 impl Default for AppState {
@@ -588,6 +642,8 @@ impl Default for AppState {
         Self {
             engine: Default::default(),
             recording: Default::default(),
+            note_capture: Default::default(),
+            note_transcription: Default::default(),
             profile: Default::default(),
             ui: Default::default(),
             http_client: reqwest::Client::builder()
@@ -966,5 +1022,32 @@ mod recording_snapshot_tests {
 
         assert!(starting.revision < recording.revision);
         assert!(recording.revision < processing.revision);
+    }
+}
+
+#[cfg(test)]
+mod note_transcription_tests {
+    use super::NoteTranscriptionState;
+
+    #[test]
+    fn a_second_transcription_is_rejected_while_one_runs() {
+        let state = NoteTranscriptionState::default();
+        let guard = state.try_begin(7).expect("first claim should win");
+        assert_eq!(state.active_note(), Some(7));
+        // 连点「转文字」：同一条笔记、另一条笔记都必须被挡住。
+        assert!(state.try_begin(7).is_none());
+        assert!(state.try_begin(8).is_none());
+
+        drop(guard);
+        assert_eq!(state.active_note(), None);
+        assert!(state.try_begin(8).is_some());
+    }
+
+    #[test]
+    fn blank_note_ids_cannot_take_the_slot() {
+        let state = NoteTranscriptionState::default();
+        assert!(state.try_begin(0).is_none());
+        assert!(state.try_begin(-1).is_none());
+        assert_eq!(state.active_note(), None);
     }
 }

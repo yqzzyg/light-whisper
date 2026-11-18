@@ -128,7 +128,13 @@ export default function NotesSidebar({
       >
         <FileText size={13} aria-hidden="true" />
         <span className="notes-note-title">{item.title.trim() || t("notes.untitled")}</span>
-        {item.hasAudio && <span className="notes-note-dot" title={t("notes.hasAudio")} />}
+        {item.hasAudio && (
+          <span
+            className="notes-note-dot"
+            data-pending={!item.hasTranscript}
+            title={item.hasTranscript ? t("notes.hasAudio") : t("notes.audioNotTranscribed")}
+          />
+        )}
       </button>
     ));
 

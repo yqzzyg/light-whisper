@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
+  AudioLines,
   Copy,
   Download,
   FileText,
   LoaderCircle,
+  Mic,
   Sparkles,
   Trash2,
   X,
@@ -14,7 +16,12 @@ import {
 import { copyToClipboard, saveTextFile } from "@/api/tauri";
 import MarkdownContent from "@/components/MarkdownContent";
 import MarkdownEditor from "@/components/notes/MarkdownEditor";
-import type { NoteDetail, NoteFolder, NotePatch } from "@/types/notes";
+import { formatDuration } from "@/lib/duration";
+import {
+  estimateTranscribeSeconds,
+  type NoteTranscriptionState,
+} from "@/hooks/noteTranscriptionStore";
+import type { NoteDetail, NoteFolder, NotePatch, NoteRecordingSnapshot } from "@/types/notes";
 
 type Tab = "content" | "transcript" | "summary";
 
@@ -75,6 +82,12 @@ export interface NoteEditorProps {
   loading: boolean;
   saving: boolean;
   untitled: string;
+  /** 会议录音状态：用于禁用「录音」按钮与显示「已录制未转写」。 */
+  recording: NoteRecordingSnapshot;
+  /** 转写状态：跨页面保留，切回来仍在跑。 */
+  transcription: NoteTranscriptionState;
+  onStartRecording: () => void;
+  onTranscribe: () => void;
   onEdit: (patch: NotePatch) => void;
   onFlush: () => void;
   onMove: (folderId: number | null) => void;
@@ -88,6 +101,10 @@ export default function NoteEditor({
   loading,
   saving,
   untitled,
+  recording,
+  transcription,
+  onStartRecording,
+  onTranscribe,
   onEdit,
   onFlush,
   onMove,
@@ -125,6 +142,16 @@ export default function NoteEditor({
 
   const transcript = note.transcript ?? "";
   const summary = note.summary ?? "";
+  // 转写状态是全局的（一次只跑一篇）：只有当前笔记在跑时才显示进度，
+  // 失败提示也只挂回出错那篇，切到别的笔记不会看到无关的报错。
+  const isTranscribing = transcription.running && transcription.noteId === note.id;
+  const transcribeBusy = transcription.running && transcription.noteId !== note.id;
+  const transcribeError =
+    !transcription.running && transcription.error?.noteId === note.id
+      ? transcription.error.message
+      : null;
+  const estimate = estimateTranscribeSeconds(note.durationSec);
+  const transcriptPending = Boolean(note.audioFile) && !transcript.trim();
   const updatedLabel = new Intl.DateTimeFormat(i18n.language, {
     month: "short",
     day: "numeric",
@@ -195,6 +222,18 @@ export default function NoteEditor({
           <button
             type="button"
             className="icon-btn plain"
+            aria-label={t("notes.recordStart")}
+            title={
+              recording.active ? t("notes.recordBusy") : t("notes.recordStart")
+            }
+            disabled={recording.active}
+            onClick={onStartRecording}
+          >
+            <Mic size={14} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn plain"
             aria-label={t("common.delete")}
             title={t("common.delete")}
             onClick={onDelete}
@@ -233,7 +272,14 @@ export default function NoteEditor({
           onClick={() => setTab("transcript")}
         >
           {t("notes.transcript")}
-          {transcript.trim() && <span className="notes-tab-dot" aria-hidden="true" />}
+          {/* 有录音没转录时点成告警色：用户停在「我的笔记」也能看到还差一步。 */}
+          {(transcript.trim() || transcriptPending) && (
+            <span
+              className="notes-tab-dot"
+              data-pending={!transcript.trim()}
+              aria-hidden="true"
+            />
+          )}
         </button>
         <button
           type="button"
@@ -259,6 +305,61 @@ export default function NoteEditor({
 
       {tab === "transcript" && (
         <div className="notes-panel">
+          {/* 从历史/上传转来的笔记：音频留在历史记录里，这里要说清去哪听，
+              否则用户会以为录音丢了。 */}
+          {note.historyId && !note.audioFile && (
+            <p className="notes-audio-hint">{t("notes.audioInHistory")}</p>
+          )}
+          {/* 先录后转：录音已经在本地，但还没有转录，说清「有什么、缺什么」，
+              并且给出唯一的下一步——转文字。 */}
+          {note.audioFile && !transcript.trim() && (
+            <div className="notes-transcribe">
+              <p className="notes-audio-hint">
+                {t("notes.recordedNotTranscribed", {
+                  duration: formatDuration(note.durationSec),
+                })}
+              </p>
+              {isTranscribing ? (
+                <p className="notes-transcribe-status" role="status">
+                  <LoaderCircle size={12} className="animate-spin" />
+                  <span>
+                    {t("notes.transcribing", {
+                      elapsed: formatDuration(transcription.elapsedSec),
+                    })}
+                  </span>
+                  {estimate !== null && (
+                    <span className="notes-transcribe-estimate">
+                      {t("notes.transcribeEstimate", { estimate: formatDuration(estimate) })}
+                    </span>
+                  )}
+                  <span className="notes-transcribe-hint">{t("notes.transcribeCanLeave")}</span>
+                </p>
+              ) : (
+                <div className="notes-transcribe-actions">
+                  <button
+                    type="button"
+                    className="notes-transcribe-btn"
+                    disabled={transcribeBusy}
+                    title={transcribeBusy ? t("notes.transcribeBusy") : t("notes.transcribe")}
+                    onClick={onTranscribe}
+                  >
+                    <AudioLines size={12} />
+                    {t("notes.transcribe")}
+                  </button>
+                  {estimate !== null && (
+                    <span className="notes-transcribe-hint">
+                      {t("notes.transcribeHint", { estimate: formatDuration(estimate) })}
+                    </span>
+                  )}
+                </div>
+              )}
+              {transcribeError && (
+                <p className="notes-transcribe-error" role="alert">
+                  {t("notes.transcribeFailed", { message: transcribeError })}
+                </p>
+              )}
+            </div>
+          )}
           <div className="notes-toolbar">
             <span>{t("notes.charCount", { count: transcript.trim().length })}</span>
             <span className="notes-toolbar-spacer" />

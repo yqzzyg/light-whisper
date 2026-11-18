@@ -65,6 +65,25 @@ pub fn get_engine_config_path() -> PathBuf {
     get_data_dir().join("engine.json")
 }
 
+/// 笔记录音目录。与历史音频分开放，两者生命周期不同（历史有租约与 GC，
+/// 笔记只按笔记自己的引用回收）。
+pub fn notes_audio_dir() -> PathBuf {
+    get_data_dir().join("notes_audio")
+}
+
+/// 把「单段文件名」拼到指定目录下，拒绝任何路径穿越。
+///
+/// 库里存的是文件名而不是绝对路径，读取时用它还原：只要 `file_name` 含分隔符、
+/// 含 `..`、为空，或者规范化后与原串不一致，就返回 `None`。
+pub fn safe_file_in_dir(dir: &Path, file_name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(file_name);
+    if candidate.components().count() != 1 || candidate.file_name()?.to_string_lossy() != file_name
+    {
+        return None;
+    }
+    Some(dir.join(candidate))
+}
+
 pub fn read_engine_config() -> String {
     configured_engine(read_engine_json().get("engine").and_then(|v| v.as_str())).to_string()
 }

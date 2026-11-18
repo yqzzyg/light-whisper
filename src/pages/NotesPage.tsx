@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, Minus, X } from "lucide-react";
+import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 
 import { hideMainWindow } from "@/api/tauri";
 import NoteEditor from "@/components/notes/NoteEditor";
 import NotesSidebar from "@/components/notes/NotesSidebar";
+import RecordingBar from "@/components/notes/RecordingBar";
 import TitleBar from "@/components/TitleBar";
+import { ensureNoteRecordingReady, startRecording, useNoteRecording } from "@/hooks/noteRecordingStore";
+import { transcribeNote, useNoteTranscription } from "@/hooks/noteTranscriptionStore";
 import {
   closeNote,
   createFolder,
@@ -38,12 +42,16 @@ export default function NotesPage({
 }) {
   const { t } = useTranslation();
   const state = useNotesStore();
+  const recording = useNoteRecording();
+  const transcription = useNoteTranscription();
   const [search, setSearch] = useState(state.query);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 首次进入拉数据；离开页面前强制落库，防止防抖窗口里的改动丢掉。
   useEffect(() => {
     void ensureNotesLoaded();
+    // 录音由后端驱动，订阅挂在模块上：离开笔记页再回来仍能看到进行中的录音。
+    void ensureNoteRecordingReady();
     const flush = () => {
       void flushNoteSave();
     };
@@ -85,6 +93,26 @@ export default function NotesPage({
   const handleDeleteFolder = (id: number, name: string) => {
     if (!window.confirm(t("notes.deleteFolderConfirm", { name }))) return;
     void deleteFolder(id);
+  };
+
+  const handleStartRecording = async () => {
+    if (!note || recording.active) return;
+    const error = await startRecording(note.id);
+    if (error) toast.error(t("notes.recordFailed", { message: error }));
+  };
+
+  /**
+   * 整段转写。命令可能跑几分钟，但用户在页面上看到的是「已用时 + 预估」，
+   * 走开了也会照常完成（状态在模块级 store 里，不随组件卸载丢失）。
+   */
+  const handleTranscribe = async () => {
+    if (!note || transcription.running) return;
+    const error = await transcribeNote(note.id);
+    if (error) {
+      toast.error(t("notes.transcribeFailed", { message: error }));
+      return;
+    }
+    toast.success(t("notes.transcribeDone"));
   };
 
   return (
@@ -143,20 +171,27 @@ export default function NotesPage({
           onLoadMore={() => void loadMoreNotes()}
         />
 
-        <NoteEditor
-          note={note}
-          folders={state.folders}
-          loading={state.loadingNote}
-          saving={state.saving}
-          untitled={untitled}
-          onEdit={editNote}
-          onFlush={() => void flushNoteSave()}
-          onMove={(folderId) => {
-            if (note) void moveNote(note.id, folderId);
-          }}
-          onDelete={handleDeleteNote}
-          onClose={() => closeNote()}
-        />
+        <div className="notes-main">
+          <RecordingBar />
+          <NoteEditor
+            note={note}
+            folders={state.folders}
+            loading={state.loadingNote}
+            saving={state.saving}
+            untitled={untitled}
+            recording={recording}
+            transcription={transcription}
+            onStartRecording={() => void handleStartRecording()}
+            onTranscribe={() => void handleTranscribe()}
+            onEdit={editNote}
+            onFlush={() => void flushNoteSave()}
+            onMove={(folderId) => {
+              if (note) void moveNote(note.id, folderId);
+            }}
+            onDelete={handleDeleteNote}
+            onClose={() => closeNote()}
+          />
+        </div>
       </div>
     </div>
   );

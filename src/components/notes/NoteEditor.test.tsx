@@ -22,6 +22,12 @@ vi.mock("@/components/MarkdownContent", () => ({
   default: ({ content }: { content: string }) => <div data-testid="markdown">{content}</div>,
 }));
 
+// 预估只是 19× 实时的除法，这里固定成 30 秒，断言「有没有显示预估」就够了。
+vi.mock("@/hooks/noteTranscriptionStore", () => ({
+  estimateTranscribeSeconds: (durationSec: number | null | undefined) =>
+    durationSec ? 30 : null,
+}));
+
 import NoteEditor, {
   buildExportFileName,
   composeNoteExport,
@@ -56,6 +62,24 @@ function setup(overrides: Partial<React.ComponentProps<typeof NoteEditor>> = {})
     loading: false,
     saving: false,
     untitled: "未命名笔记",
+    recording: {
+      active: false,
+      sessionId: null,
+      noteId: null,
+      elapsedSec: 0,
+      level: 0,
+      audioFile: null,
+      durationSec: null,
+      error: null,
+    },
+    transcription: {
+      noteId: null,
+      running: false,
+      elapsedSec: 0,
+      error: null,
+    },
+    onStartRecording: vi.fn(),
+    onTranscribe: vi.fn(),
     onEdit: vi.fn(),
     onFlush: vi.fn(),
     onMove: vi.fn(),
@@ -104,6 +128,109 @@ describe("NoteEditor", () => {
     fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
     expect(screen.getByText("notes.transcriptEmpty")).toBeTruthy();
     expect(screen.getByText("notes.transcriptHint")).toBeTruthy();
+  });
+
+  it("points the user to the history record when the audio lives there", () => {
+    setup({ note: detail({ historyId: 42, audioFile: null }) });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+    expect(screen.getByText("notes.audioInHistory")).toBeTruthy();
+  });
+
+  it("does not point at history once the note owns its own recording", () => {
+    setup({ note: detail({ historyId: 42, audioFile: "9-1700000000.wav" }) });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+    expect(screen.queryByText("notes.audioInHistory")).toBeNull();
+  });
+
+  it("tells the user a recording exists but has not been transcribed", () => {
+    setup({ note: detail({ audioFile: "note-9-1.wav", transcript: null, durationSec: 95 }) });
+    const tab = screen.getByRole("tab", { name: "notes.transcript" });
+    // 转录 tab 上挂告警色圆点：用户停在「我的笔记」也能看出还差一步。
+    expect(tab.querySelector(".notes-tab-dot")?.getAttribute("data-pending")).toBe("true");
+
+    fireEvent.click(tab);
+    // i18n 被 mock 成返回 key，时长参数不参与断言。
+    expect(screen.getByText("notes.recordedNotTranscribed")).toBeTruthy();
+  });
+
+  it("drops the not-transcribed hint once a transcript exists", () => {
+    setup({ note: detail({ audioFile: "note-9-1.wav", transcript: "大家好" }) });
+    const tab = screen.getByRole("tab", { name: "notes.transcript" });
+    expect(tab.querySelector(".notes-tab-dot")?.getAttribute("data-pending")).toBe("false");
+
+    fireEvent.click(tab);
+    expect(screen.queryByText("notes.recordedNotTranscribed")).toBeNull();
+  });
+
+  it("offers the transcribe action for a recording without a transcript", () => {
+    const props = setup({
+      note: detail({ audioFile: "note-9-1.wav", transcript: null, durationSec: 95 }),
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /notes\.transcribe/ }));
+
+    expect(props.onTranscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows elapsed time instead of the button while transcribing", () => {
+    setup({
+      note: detail({ audioFile: "note-9-1.wav", transcript: null, durationSec: 95 }),
+      transcription: { noteId: 1, running: true, elapsedSec: 42, error: null },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    expect(screen.getByText("notes.transcribing")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /notes\.transcribe$/ })).toBeNull();
+  });
+
+  it("keeps the transcribe button disabled while another note is running", () => {
+    setup({
+      note: detail({ audioFile: "note-9-1.wav", transcript: null, durationSec: 95 }),
+      transcription: { noteId: 99, running: true, elapsedSec: 5, error: null },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    const button = screen.getByRole("button", { name: /notes\.transcribe/ });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("surfaces the failure message inline for the failed note", () => {
+    setup({
+      note: detail({ audioFile: "note-9-1.wav", transcript: null }),
+      transcription: {
+        noteId: null,
+        running: false,
+        elapsedSec: 0,
+        error: { noteId: 1, message: "引擎未就绪" },
+      },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    expect(screen.getByText("notes.transcribeFailed")).toBeTruthy();
+  });
+
+  it("starts a recording from the header", () => {
+    const props = setup();
+    fireEvent.click(screen.getByRole("button", { name: "notes.recordStart" }));
+    expect(props.onStartRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the record button while a recording is already running", () => {
+    setup({
+      recording: {
+        active: true,
+        sessionId: 1,
+        noteId: 9,
+        elapsedSec: 3,
+        level: 0.2,
+        audioFile: null,
+        durationSec: null,
+        error: null,
+      },
+    });
+    const button = screen.getByRole("button", { name: "notes.recordStart" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("toggles markdown preview and mounts the renderer only there", () => {

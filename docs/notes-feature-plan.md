@@ -1,6 +1,6 @@
 # 笔记功能 — 方案调研与工作清单
 
-> 状态：方案已定，待实现 · 最后更新：2026-11-18
+> 状态：P0/P1/P2 已完成，P3（录音 + 手动转写）已完成，P4 待实现 · 最后更新：2026-11-18
 > 目标：左侧栏新增「笔记」，支持建立笔记目录、在目录下创建笔记；最终能在会议时录音并据此生成笔记。
 > 参考实现：`D:\MyData\Code\CodeWorkSpace\StudyProject\StudyAi\whisper\openwhispr`（桌面端 + 移动端）。
 
@@ -379,37 +379,59 @@ notes_service::set_transcript(note_id, text, duration_sec, Some(history_id))
 - 实现说明：导出文档由**前端**按当前界面语言拼装（标题 + 正文 + 转录 + 摘要），后端 `save_text_file` 只负责弹框与落盘，避免中英文两套界面下后端写死中文小节名；预览复用 `MarkdownContent`，编辑态不付公式预处理的开销
 - 偏移：导出从 P5 提前到这里（转录 txt 与整篇 Markdown 共用同一条命令），P5 只留全局搜索与拖拽等打磨项
 
-### P2 历史/上传 → 笔记
+### P2 历史/上传 → 笔记（已完成 2026-11-18）
 
-- [ ] `create_note_from_history` 命令
-- [ ] 历史页每条记录「存为笔记」入口
-- [ ] 上传页结果卡「存为笔记」
-- 验收：37 分钟录音 → 存为笔记 → 转录完整、音频仍可播放/定位
+- [x] `create_note_from_history` 命令（`commands/notes.rs`）：取历史记录 → 首行生成标题 → 建笔记 + 写转录
+- [x] `notes_service::create_note_from_transcript`（含 `*_with_connection` 版本，便于单测）
+- [x] 历史页每条成功记录「存为笔记」图标按钮
+- [x] 上传页结果卡「存为笔记」按钮（流式中不出现）
+- [x] 存完直接跳到笔记页并选中该笔记（`notesStore::createNoteFromHistory`）
+- 验收：历史记录 → 存为笔记 → 转录完整、时长保留、音频仍留在历史页可播放
+- 实现说明：
+  - **幂等**：同一条历史记录重复调用返回已有笔记（按 `history_id` 查），连点不会堆重复笔记
+  - **音频不复制**：`audio_file` 留空，靠 `history_id` 反查；转录 tab 顶部加一行「录音保存在历史记录中」说明，避免用户以为录音丢了
+  - 标题取正文首个非空行、去掉 Markdown 前缀、40 字截断；历史记录本身没有标题，否则侧栏会是一列「未命名笔记」
+  - 空文本记录直接拒绝（「这条记录没有转写文本」），不产生空笔记
+  - `notesStore` 的该动作**不吞异常**：后端文案要原样进 toast，页面据此决定是否跳转
 
 ### P3 会议录音 → 笔记（先录后转，手动触发转写）
 
-阶段一：只录音
+阶段一：只录音（已完成 2026-11-18）
 
-- [ ] `wav_writer.rs`：占位头 + 分块追加 + 关闭回填（含单测）
-- [ ] `paths::notes_audio_dir()` + `safe_file_in_dir()`（把 `history_service::safe_audio_path` 里的单段名校验抽出来共用）
-- [ ] `notes_service` 的音频回收：删笔记 / 删目录级联 / 启动清 `notes_audio/` 里未被引用的残留（含崩溃半截录音补写长度）
-- [ ] `note_recording_service.rs`：采集会话、每 30 秒重采样落盘、时长、停止/取消、`AppState.note_capture` 互斥
-- [ ] 4 个命令（`start/stop/cancel/get_state`）+ `note-recording-state` 事件 + `formal/verification.json` 登记
-- [ ] `RecordingBar`：计时 / 电平 / 停止 / 取消；停止后写 `notes.audio_file` + `duration_sec`
+- [x] `wav_writer.rs`：占位头 + 分块追加 + 关闭回填（含单测）
+- [x] `paths::notes_audio_dir()` + `safe_file_in_dir()`（把 `history_service::safe_audio_path` 里的单段名校验抽出来共用）
+- [x] `notes_service` 的音频回收：删笔记时删文件 / 启动清 `notes_audio/` 里未被引用的残留（含崩溃半截录音补写长度）
+- [x] `note_recording_service.rs`：采集会话、排空重采样落盘、时长、停止/取消、`AppState.note_capture` 互斥
+- [x] 4 个命令（`start/stop/cancel/get_state`）+ `note-recording-state` 事件 + `formal/verification.json` 登记（152 命令 / 22 事件）
+- [x] `RecordingBar`：计时 / 电平 / 停止 / 取消；停止后写 `notes.audio_file` + `duration_sec`
 - 验收：录 10 分钟可随时切页；停止后音频文件存在且能播放；**录音后直接重启应用，文件仍在**；「有录音未转写」状态在列表与详情可见
+- 实现说明（与原计划的差异）：
+  - **落盘间隔 500ms 而不是 30 秒**。崩溃最多丢半秒；UI 计时与电平也需要更细的粒度。16k 单声道每秒只有 32KB，代价可以忽略。
+  - **排空走 tokio 任务而不是专用线程**：录音期间没有 ASR，任务每 500ms 醒一次即可；`stop` 时 abort + 取写锁收尾，无需跨线程握手。
+  - **互斥是单向的**：开始会议录音时会拒绝（听写占用中），但听写开始时不检查会议录音——那条是热键热路径，改动风险高，两路同时采集会各拿一份数据，不会互相破坏。列为一期已知行为。
+  - **崩溃遗留按「孤儿」处理**：启动时先 `repair_header` 再删未被引用的文件，所以「录到一半进程被杀」的音频不会挂到任何笔记上，会被清掉（只保留已 `stop` 的录音）。
+  - **删笔记会先取消录音**：否则停止时会把音频写到一行已不存在的数据上。
+  - 列表的录音标记分两色：已转写用强调色，**有录音未转写用告警色**，一眼能看出还差一步。
 
-阶段二：手动转写（窄接口，不复制音频）
+阶段二：手动转写（已完成 2026-11-18）
 
-- [ ] `funasr_service::transcribe_path`：直接下发 `audio_path`（约 25 行，复用现有预算与超时）
-- [ ] `transcription_service::transcribe_file`：分派本地/在线 + 在线上限 + 错误归一（约 120 行）
-- [ ] `check_engine_limit` 迁入 service，`audio_import.rs` 改为调用它（行为与文案不变）
-- [ ] `transcribe_note_recording` 命令：取路径 → 转写 → `insert(mode="note", audio_file=None)` → `set_transcript`
-- [ ] 「转文字」按钮 / 已用时与预估 / 失败提示 / 幂等重试（重复点不产生第二条历史）
+- [x] `funasr_service::transcribe_path`：直接下发 `audio_path`（不加锁以外的额外拷贝，复用现有预算与超时）
+- [x] `transcription_service::transcribe_file`：分派本地/在线 + 在线上限 + 错误归一
+- [x] `check_engine_limit` 迁入 service，`audio_import.rs` 改为调用它（行为与文案不变）
+- [x] `transcribe_note_recording` 命令：取路径 → 转写 → `insert(mode="note", audio_file=None)` → `set_transcript`
+- [x] 「转文字」按钮 / 已用时与预估 / 失败提示 / 幂等重试（重复点不产生第二条历史）
 - 验收（功能）：同一段录音点两次「转文字」结果一致、历史只有一条；转写中切页回来仍在跑
 - 验收（无复制）：转写前后 `notes_audio` 与 `history_audio` 都不新增文件；历史行 `audio_file` 为 `NULL`，历史详情提示「录音在笔记中」
 - 验收（超时）：1 小时录音转写成功，预算日志与导入同一条曲线（`ceil(dur*0.1+120)` 封顶 900）
 - 验收（耗电）：录 10 分钟时 ASR 子进程不活跃、CPU 接近空闲；对照首页实时转录持续占用
 - 验收（容错）：转写阶段断网/切引擎/引擎报错，音频仍在，按钮回到「转文字」可重试；在线引擎超限给明确文案而不是泛化失败
+- 实现说明（与原计划的差异）：
+  - **转写失败不写历史**。笔记场景的错误在笔记里就地展示，写一条 0 字历史只会污染列表；成功才 `insert`，因此重试永远不会多出第二条（原先设计的「失败留痕 + 原地更新」被省掉）。
+  - **幂等靠「已有转录直接返回」**：`transcribe_note_recording` 先读笔记，`transcript` 非空即原样返回，不重跑 ASR。想换引擎重转需要 P5 的「重新转写」，一期不做。
+  - **并发保护是后端原子占位**（`AppState.note_transcription`），不是前端 `disabled`：连点、两窗口、两个入口都挡在服务层，前端按钮只是配合。
+  - **在线引擎先看文件元数据再读字节**：GLM 的 30 秒与 DashScope 的 10MB 判据都能在 `metadata().len()` 上判，避免为了一句超限提示把上百兆读进内存。
+  - **历史行的 `session_id` 用毫秒时间戳**（笔记没有录音会话 ID），与导入同一套做法。
+  - 历史页新增 `note` 模式文案与「录音保存在笔记里」提示；从历史跳到笔记需要 `history_id → note` 反查命令，列入 P5。
 
 ### P4 AI 摘要生成（手动触发）
 
@@ -428,6 +450,8 @@ notes_service::set_transcript(note_id, text, duration_sec, Some(history_id))
 - [ ] 目录拖拽排序、笔记拖拽入目录
 - [ ] 超长会议分段转写：>2 小时按 30 分钟切片、逐段转写再拼接（规避引擎整段拼 PCM 的内存增长）
 - [ ] 可选「边录边转」开关（默认关）：打开后走首页已验证的实时流式链路，代价是持续推理耗电
+- [ ] 「重新转写」：已有转录时允许换引擎重跑（后端幂等分支当前会直接返回）
+- [ ] 历史 → 笔记反查跳转：新增按 `history_id` 取笔记的命令，历史卡片上直接打开对应笔记
 
 ## 5. 风险与决策点
 

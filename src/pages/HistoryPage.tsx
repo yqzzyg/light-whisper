@@ -12,6 +12,7 @@ import {
   FileAudio,
   FolderOpen,
   Minus,
+  NotebookPen,
   RefreshCw,
   Search,
   Sparkles,
@@ -32,6 +33,7 @@ import {
   revealHistoryAudio,
 } from "@/api/tauri";
 import TitleBar from "@/components/TitleBar";
+import { createNoteFromHistory } from "@/hooks/notesStore";
 import { prefersReducedMotion } from "@/lib/motion";
 import type {
   PersistentHistoryRecord,
@@ -39,7 +41,7 @@ import type {
   RecordingMode,
 } from "@/types";
 
-type View = "main" | "settings" | "history";
+type View = "main" | "settings" | "history" | "notes";
 type StatusFilter = "" | "success" | "failed";
 
 function errorMessage(error: unknown): string {
@@ -210,6 +212,21 @@ export default function HistoryPage({
     }
   };
 
+  /** 存为笔记：音频留在历史记录里，笔记只带走转录与时长，然后直接跳过去。 */
+  const saveAsNote = async (record: PersistentHistoryRecord) => {
+    if (workingId != null) return;
+    setWorkingId(record.id);
+    try {
+      await createNoteFromHistory(record.id);
+      toast.success(t("historyPage.saveToNotesDone"));
+      onNavigate("notes");
+    } catch (error) {
+      toast.error(t("historyPage.saveToNotesFailed", { error: errorMessage(error) }));
+    } finally {
+      setWorkingId(null);
+    }
+  };
+
   const remove = async (record: PersistentHistoryRecord) => {
     if (workingId != null) return;
     if (!window.confirm(t("historyPage.deleteConfirm"))) return;
@@ -374,6 +391,10 @@ export default function HistoryPage({
                       <p>{record.text}</p>
                     )}
                     {record.appRuleName && <small>{t("historyPage.appRule", { name: record.appRuleName })}</small>}
+                    {/* 笔记转写写的历史行不持有音频：说清录音在哪，别让用户以为丢了。 */}
+                    {record.mode === "note" && !record.audioAvailable && (
+                      <small>{t("historyPage.audioInNote")}</small>
+                    )}
                   </div>
 
                   {hasDetails && (
@@ -425,6 +446,11 @@ export default function HistoryPage({
                     {record.audioAvailable && (
                       <button className="icon-btn icon-btn-sm" title={t("historyPage.openAudioFolder")} aria-label={t("historyPage.openAudioFolder")} onClick={() => void revealAudio(record)}>
                         <FolderOpen size={13} />
+                      </button>
+                    )}
+                    {!failed && record.text && (
+                      <button className="icon-btn icon-btn-sm" disabled={isWorking} title={t("historyPage.saveToNotes")} aria-label={t("historyPage.saveToNotes")} onClick={() => void saveAsNote(record)}>
+                        <NotebookPen size={13} />
                       </button>
                     )}
                     <button className="icon-btn icon-btn-sm" title={t("common.copy")} aria-label={t("common.copy")} onClick={() => void copyRecord(record)}>

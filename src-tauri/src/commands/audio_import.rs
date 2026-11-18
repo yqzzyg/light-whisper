@@ -14,11 +14,11 @@ use tokio::sync::MutexGuard;
 
 use crate::services::audio_service::next_native_session_id;
 use crate::services::funasr_service::native_stream::NativeStreamClient;
-use crate::services::{audio_import_service, funasr_service, history_service};
+use crate::services::{
+    audio_import_service, funasr_service, history_service, transcription_service,
+};
 use crate::state::AppState;
 use crate::utils::{paths, AppError};
-
-use super::history::transcribe_wav_bytes_dispatched;
 
 /// 流式喂入块大小：16000 样本 = 1 秒。
 const STREAM_FEED_SAMPLES: usize = 16_000;
@@ -26,11 +26,6 @@ const STREAM_FEED_SAMPLES: usize = 16_000;
 /// 导入流式结果的 sessionId 上界取负数，确保浮层（sessionId >= 0 才处理）与
 /// 主界面（interim 直接丢弃）都不会把导入结果当成录音字幕。
 const IMPORT_SESSION_ID_BASE: i64 = -1_000_000;
-
-// 引擎限制常量，与各 ASR 服务保持一致。
-const GLM_MAX_DURATION_SECS: f64 = 30.0;
-const GLM_MAX_BYTES: usize = 25 * 1024 * 1024;
-const DASHSCOPE_MAX_BASE64_BYTES: usize = 10 * 1024 * 1024;
 
 fn emit_history_updated(app_handle: &tauri::AppHandle, id: Option<i64>) {
     let _ = app_handle.emit("history-updated", serde_json::json!({ "id": id }));
@@ -145,34 +140,9 @@ pub async fn pick_audio_file(window: tauri::WebviewWindow) -> Result<Option<Stri
 
 /// 校验解码后的 WAV 是否超出当前引擎的上限。
 ///
-/// 本地引擎返回 Ok（底层已内置长音频自动分块）；在线引擎按时长/大小拦截。
+/// 判据在 `transcription_service` 里（导入与笔记转写共用同一套文案）。
 fn check_engine_limit(wav: &[u8], duration_sec: f64) -> Result<(), AppError> {
-    let engine = paths::read_engine_config();
-    match engine.as_str() {
-        "glm-asr" => {
-            if duration_sec > GLM_MAX_DURATION_SECS {
-                return Err(AppError::Asr(format!(
-                    "音频约 {:.0} 秒，超过 GLM-ASR 的 {} 秒上限，请裁剪后重试或切换本地引擎",
-                    duration_sec, GLM_MAX_DURATION_SECS as u32
-                )));
-            }
-            if wav.len() > GLM_MAX_BYTES {
-                return Err(AppError::Asr(
-                    "音频文件超过 GLM-ASR 的 25MB 上限，请裁剪后重试".into(),
-                ));
-            }
-        }
-        "alibaba-asr" => {
-            // base64 放大 4/3，按放大后长度比对 10MB 上限。
-            if wav.len().saturating_mul(4) / 3 > DASHSCOPE_MAX_BASE64_BYTES {
-                return Err(AppError::Asr(
-                    "音频文件超过 DashScope 的 10MB 请求上限（约 3.9 分钟），请裁剪后重试或切换本地引擎".into(),
-                ));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    transcription_service::check_engine_limit(wav.len(), duration_sec)
 }
 
 /// 导入并转写音频，返回历史记录。
@@ -215,7 +185,7 @@ pub async fn transcribe_imported_audio(
         }
     } else {
         // 在线引擎不支持流式：维持一次性转写，转完才在上传页出结果。
-        transcribe_wav_bytes_dispatched(
+        transcription_service::transcribe_wav_bytes(
             &app_handle,
             state.inner(),
             imported.wav.clone(),

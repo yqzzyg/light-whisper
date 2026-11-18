@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
@@ -145,12 +145,7 @@ fn history_audio_dir() -> PathBuf {
 }
 
 fn safe_audio_path(file_name: &str) -> Option<PathBuf> {
-    let candidate = Path::new(file_name);
-    if candidate.components().count() != 1 || candidate.file_name()?.to_string_lossy() != file_name
-    {
-        return None;
-    }
-    Some(history_audio_dir().join(candidate))
+    paths::safe_file_in_dir(&history_audio_dir(), file_name)
 }
 
 fn open_connection() -> Result<Connection, String> {

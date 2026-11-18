@@ -127,6 +127,16 @@ pub fn run() {
                 });
             }
 
+            // 笔记录音目录的清理由笔记库决定归属，必须等笔记库就绪后再跑：
+            // 先补写崩溃留下的半截 WAV 头，再删掉没有任何笔记引用的文件。
+            {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = services::note_recording_service::cleanup_startup().await {
+                        log::warn!("清理笔记录音残留失败: {error}");
+                    }
+                });
+            }
+
             // 注册翻译/助手热键
             {
                 type HotkeyRegisterFn =
@@ -386,7 +396,13 @@ pub fn run() {
             commands::notes::update_note,
             commands::notes::delete_note,
             commands::notes::move_note,
+            commands::notes::create_note_from_history,
             commands::notes::save_text_file,
+            commands::note_recording::start_note_recording,
+            commands::note_recording::stop_note_recording,
+            commands::note_recording::cancel_note_recording,
+            commands::note_recording::get_note_recording_state,
+            commands::note_transcription::transcribe_note_recording,
         ]))
         .run(tauri::generate_context!())
         .expect("启动会听时发生错误");

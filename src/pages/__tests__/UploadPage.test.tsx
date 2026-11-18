@@ -9,6 +9,9 @@ const mocks = vi.hoisted(() => ({
   hideMainWindow: vi.fn(),
   minimize: vi.fn(),
   copyToClipboard: vi.fn(),
+  createNoteFromHistory: vi.fn(),
+  listNoteFolders: vi.fn(),
+  listNotes: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
 }));
@@ -25,6 +28,9 @@ vi.mock("@/hooks/useAudioImport", () => ({
 vi.mock("@/api/tauri", () => ({
   hideMainWindow: mocks.hideMainWindow,
   copyToClipboard: mocks.copyToClipboard,
+  createNoteFromHistory: mocks.createNoteFromHistory,
+  listNoteFolders: mocks.listNoteFolders,
+  listNotes: mocks.listNotes,
 }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ minimize: mocks.minimize }),
@@ -102,6 +108,28 @@ describe("UploadPage", () => {
     expect(textbox.value).toBe("第一行\n第二行");
     expect(screen.getByText("upload.resultHint")).toBeTruthy();
     expect(screen.getByRole("button", { name: /upload.importAnother/ })).toBeTruthy();
+  });
+
+  it("saves the imported result as a note and opens the notes page", async () => {
+    mocks.result = successRecord({ text: "会议原文" });
+    mocks.createNoteFromHistory.mockResolvedValue({ id: 1, folderId: null });
+    mocks.listNoteFolders.mockResolvedValue([]);
+    mocks.listNotes.mockResolvedValue({ items: [], total: 0, hasMore: false });
+    const onNavigate = vi.fn();
+    render(<UploadPage onNavigate={onNavigate} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "upload.saveToNotes" }));
+
+    await waitFor(() => expect(mocks.createNoteFromHistory).toHaveBeenCalledWith(1));
+    expect(mocks.toastSuccess).toHaveBeenCalledWith("upload.saveToNotesDone");
+    expect(onNavigate).toHaveBeenCalledWith("notes");
+  });
+
+  it("does not offer save-as-note while the transcript is still streaming", () => {
+    mocks.isImporting = true;
+    mocks.interimText = "正在识别的半句";
+    render(<UploadPage onNavigate={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "upload.saveToNotes" })).toBeNull();
   });
 
   it("previews interim text in real time while importing", () => {

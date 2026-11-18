@@ -31,6 +31,7 @@ import type {
   NotePage,
   NotePatch,
   NoteQuery,
+  NoteRecordingSnapshot,
   PersistentHistoryFilter,
   PersistentHistoryPage,
   PersistentHistoryRecord,
@@ -783,7 +784,56 @@ export function moveNote(id: number, folderId: number | null): Promise<NoteDetai
   return invokeCommand<NoteDetail | null>("move_note", { id, folderId });
 }
 
+/**
+ * 历史记录 → 笔记：转录与时长随笔记走，音频仍归历史记录。
+ * 同一条历史记录重复调用返回已有笔记，不会重复创建。
+ */
+export function createNoteFromHistory(
+  historyId: number,
+  folderId: number | null = null
+): Promise<NoteDetail> {
+  return invokeCommand<NoteDetail>("create_note_from_history", { historyId, folderId });
+}
+
 /** 弹保存对话框把文本写到用户选的位置；用户取消时返回 null。 */
 export function saveTextFile(fileName: string, content: string): Promise<string | null> {
   return invokeCommand<string | null>("save_text_file", { fileName, content });
+}
+
+// ---------------------------------------------------------------------------
+// 会议录音
+// ---------------------------------------------------------------------------
+
+/** 开始为指定笔记录音。同一时刻只允许一个会话，听写进行中会被拒绝。 */
+export function startNoteRecording(noteId: number): Promise<NoteRecordingSnapshot> {
+  return invokeCommand<NoteRecordingSnapshot>("start_note_recording", { noteId });
+}
+
+/** 停止录音：后端回填 WAV 头并把文件名、时长写回笔记。 */
+export function stopNoteRecording(): Promise<NoteRecordingSnapshot> {
+  return invokeCommand<NoteRecordingSnapshot>("stop_note_recording");
+}
+
+/** 取消录音：删除半成品文件，笔记保持原样。 */
+export function cancelNoteRecording(): Promise<void> {
+  return invokeCommand<void>("cancel_note_recording");
+}
+
+/** 页面切回来时同步一次，避免只依赖事件漏掉状态。 */
+export function getNoteRecordingState(): Promise<NoteRecordingSnapshot> {
+  return invokeCommand<NoteRecordingSnapshot>("get_note_recording_state");
+}
+
+// ---------------------------------------------------------------------------
+// 笔记转写
+// ---------------------------------------------------------------------------
+
+/**
+ * 把笔记的会议录音整段转成文字，返回更新后的笔记。
+ *
+ * 后端直接把录音路径交给引擎，不复制音频；笔记已有转录时幂等返回，重复点不会
+ * 重跑 ASR，也不会多一条历史。长会议可能要几分钟，期间前端可以切走。
+ */
+export function transcribeNoteRecording(noteId: number): Promise<NoteDetail> {
+  return invokeCommand<NoteDetail>("transcribe_note_recording", { noteId });
 }
