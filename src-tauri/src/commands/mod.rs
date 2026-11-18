@@ -14,6 +14,7 @@ pub mod history;
 pub mod hotkey;
 pub mod jev;
 pub mod model_connection;
+pub mod notes;
 #[cfg(test)]
 mod polish_credential_tests;
 pub mod profile;

@@ -15,6 +15,7 @@ pub mod jev_tasks;
 pub mod llm_client;
 pub mod llm_provider;
 pub mod model_connection;
+pub mod notes_service;
 mod oauth_callback;
 pub mod profile_service;
 pub mod qwen_hotword_service;

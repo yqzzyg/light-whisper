@@ -489,6 +489,42 @@
     "commands::audio::cancel_dictation_polish": [
       "recording",
       "transport"
+    ],
+    "commands::notes::list_note_folders": [
+      "notes"
+    ],
+    "commands::notes::create_note_folder": [
+      "notes"
+    ],
+    "commands::notes::rename_note_folder": [
+      "notes"
+    ],
+    "commands::notes::delete_note_folder": [
+      "notes"
+    ],
+    "commands::notes::reorder_note_folders": [
+      "notes"
+    ],
+    "commands::notes::list_notes": [
+      "notes"
+    ],
+    "commands::notes::get_note": [
+      "notes"
+    ],
+    "commands::notes::create_note": [
+      "notes"
+    ],
+    "commands::notes::update_note": [
+      "notes"
+    ],
+    "commands::notes::delete_note": [
+      "notes"
+    ],
+    "commands::notes::move_note": [
+      "notes"
+    ],
+    "commands::notes::save_text_file": [
+      "notes"
     ]
   },
   "events": {
@@ -1888,6 +1924,27 @@
         "docs/exact-head-verification.md"
       ],
       "assumptions": "Two contexts and two abstract K/vocabulary keys; four-column requests only, two calls per context for policy and three across at most two lifetimes for restart. One eligible application head per backend context; serialized synchronous application commands and idle-lock exclusion. Actual stock-kernel/device/layout guards narrow eligibility. Other column counts retain their actual scalar shape outside this model. Calibration effects/ticks are conservative abstract observations; native parity rejection skips timing. First-input parity is not all-input arithmetic proof. No compiler/driver refinement, unrestricted concurrent C ABI calls, universal GPU validation or performance proof."
+    },
+    "notes": {
+      "obligation": "Notes and note folders persist in an independent SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes.",
+      "models": {
+        "HistoryRecords": [
+          "DeleteTransactionIsAtomic"
+        ]
+      },
+      "implementation": [
+        "src-tauri/src/services/notes_service.rs",
+        "src-tauri/src/commands/notes.rs"
+      ],
+      "evidence": [
+        "src-tauri/src/services/notes_service.rs#deleting_a_folder_unfiles_its_notes_without_touching_others",
+        "src-tauri/src/services/notes_service.rs#reorder_folders_applies_the_given_order",
+        "src-tauri/src/services/notes_service.rs#pagination_reports_total_and_has_more",
+        "src-tauri/src/services/notes_service.rs#underscore_in_query_is_a_literal_not_a_wildcard",
+        "src-tauri/src/services/notes_service.rs#update_note_only_touches_supplied_fields",
+        "src-tauri/src/commands/notes.rs#export_file_name_keeps_only_the_last_segment"
+      ],
+      "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. notes.sqlite3 is independent of the history database and never shares its audio GC or lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. The model bounds one folder and two notes; it is not a refinement of the Rust source."
     }
   },
   "runs": {
@@ -3352,6 +3409,18 @@
     "commands::funasr::set_audio_processing_enabled": "src-tauri/src/commands/funasr.rs#fn set_audio_processing_enabled(",
     "commands::profile::get_profile_save_status": "src-tauri/src/commands/profile.rs#pub fn get_profile_save_status",
     "commands::profile::retry_profile_save": "src-tauri/src/commands/profile.rs#pub async fn retry_profile_save",
-    "commands::audio::cancel_dictation_polish": "src-tauri/src/commands/audio.rs#fn cancel_dictation_polish("
+    "commands::audio::cancel_dictation_polish": "src-tauri/src/commands/audio.rs#fn cancel_dictation_polish(",
+    "commands::notes::list_note_folders": "src-tauri/src/commands/notes.rs#fn list_note_folders(",
+    "commands::notes::create_note_folder": "src-tauri/src/commands/notes.rs#fn create_note_folder(",
+    "commands::notes::rename_note_folder": "src-tauri/src/commands/notes.rs#fn rename_note_folder(",
+    "commands::notes::delete_note_folder": "src-tauri/src/commands/notes.rs#fn delete_note_folder(",
+    "commands::notes::reorder_note_folders": "src-tauri/src/commands/notes.rs#fn reorder_note_folders(",
+    "commands::notes::list_notes": "src-tauri/src/commands/notes.rs#fn list_notes(",
+    "commands::notes::get_note": "src-tauri/src/commands/notes.rs#fn get_note(",
+    "commands::notes::create_note": "src-tauri/src/commands/notes.rs#fn create_note(",
+    "commands::notes::update_note": "src-tauri/src/commands/notes.rs#fn update_note(",
+    "commands::notes::delete_note": "src-tauri/src/commands/notes.rs#fn delete_note(",
+    "commands::notes::move_note": "src-tauri/src/commands/notes.rs#fn move_note(",
+    "commands::notes::save_text_file": "src-tauri/src/commands/notes.rs#pub async fn save_text_file("
   }
 }

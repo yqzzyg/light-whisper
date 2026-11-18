@@ -25,6 +25,12 @@ import type {
   OpenaiCodexOauthDeviceCodeChallenge,
   OpenaiCodexOauthStatus,
   XaiAuthMode,
+  NoteDetail,
+  NoteFolder,
+  NoteKind,
+  NotePage,
+  NotePatch,
+  NoteQuery,
   PersistentHistoryFilter,
   PersistentHistoryPage,
   PersistentHistoryRecord,
@@ -722,3 +728,62 @@ export function setModelsDir(path: string | null, migrate: boolean): Promise<Mod
 }
 
 export { enableAutostart, disableAutostart, isAutostartEnabled };
+
+// ---------------------------------------------------------------------------
+// 笔记
+// ---------------------------------------------------------------------------
+
+export function listNoteFolders(): Promise<NoteFolder[]> {
+  return invokeCommand<NoteFolder[]>("list_note_folders");
+}
+
+export function createNoteFolder(name: string): Promise<NoteFolder> {
+  return invokeCommand<NoteFolder>("create_note_folder", { name });
+}
+
+export function renameNoteFolder(id: number, name: string): Promise<NoteFolder> {
+  return invokeCommand<NoteFolder>("rename_note_folder", { id, name });
+}
+
+/** 删目录不删笔记：目录内笔记退化为「未分类」。 */
+export function deleteNoteFolder(id: number): Promise<boolean> {
+  return invokeCommand<boolean>("delete_note_folder", { id });
+}
+
+export function reorderNoteFolders(ids: number[]): Promise<NoteFolder[]> {
+  return invokeCommand<NoteFolder[]>("reorder_note_folders", { ids });
+}
+
+export function listNotes(query: NoteQuery): Promise<NotePage> {
+  return invokeCommand<NotePage>("list_notes", { query });
+}
+
+export function getNote(id: number): Promise<NoteDetail | null> {
+  return invokeCommand<NoteDetail | null>("get_note", { id });
+}
+
+export function createNote(
+  folderId: number | null,
+  title: string,
+  kind: NoteKind = "personal"
+): Promise<NoteDetail> {
+  return invokeCommand<NoteDetail>("create_note", { folderId, title, kind });
+}
+
+export function updateNote(id: number, patch: NotePatch): Promise<NoteDetail | null> {
+  return invokeCommand<NoteDetail | null>("update_note", { id, patch });
+}
+
+/** 删除笔记，返回被删笔记的音频文件名（P3 起由录音侧清理）。 */
+export function deleteNote(id: number): Promise<string | null> {
+  return invokeCommand<string | null>("delete_note", { id });
+}
+
+export function moveNote(id: number, folderId: number | null): Promise<NoteDetail | null> {
+  return invokeCommand<NoteDetail | null>("move_note", { id, folderId });
+}
+
+/** 弹保存对话框把文本写到用户选的位置；用户取消时返回 null。 */
+export function saveTextFile(fileName: string, content: string): Promise<string | null> {
+  return invokeCommand<string | null>("save_text_file", { fileName, content });
+}

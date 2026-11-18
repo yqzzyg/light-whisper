@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useState, useRef, useCallback, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { Toaster } from "sonner";
-import { CircleCheck, CircleAlert, Info, TriangleAlert, LoaderCircle, Home, History, Upload, Settings, type LucideIcon } from "lucide-react";
+import { CircleCheck, CircleAlert, Info, TriangleAlert, LoaderCircle, Home, History, Upload, NotebookPen, Settings, type LucideIcon } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { RecordingProvider } from "./contexts/RecordingContext";
@@ -14,18 +14,21 @@ import { useTranslation } from "react-i18next";
 import "./styles/theme.css";
 import "./styles/pages.css";
 
-type View = "main" | "settings" | "history" | "upload";
+type View = "main" | "settings" | "history" | "upload" | "notes";
 const loadSettingsPage = () => import("./pages/SettingsPage");
 const loadHistoryPage = () => import("./pages/HistoryPage");
 const loadUploadPage = () => import("./pages/UploadPage");
+const loadNotesPage = () => import("./pages/NotesPage");
 const SettingsPage = lazy(loadSettingsPage);
 const HistoryPage = lazy(loadHistoryPage);
 const UploadPage = lazy(loadUploadPage);
+const NotesPage = lazy(loadNotesPage);
 
 const navItems: Array<{ id: View; labelKey: string; icon: LucideIcon }> = [
   { id: "main", labelKey: "app.navHome", icon: Home },
   { id: "history", labelKey: "app.navHistory", icon: History },
   { id: "upload", labelKey: "app.navUpload", icon: Upload },
+  { id: "notes", labelKey: "app.navNotes", icon: NotebookPen },
   { id: "settings", labelKey: "app.navSettings", icon: Settings },
 ];
 
@@ -102,6 +105,9 @@ export function App() {
       void loadUploadPage().catch((error) => {
         console.error("Upload page preload failed:", error);
       });
+      void loadNotesPage().catch((error) => {
+        console.error("Notes page preload failed:", error);
+      });
     }, 400);
 
     return () => window.clearTimeout(preloadTimer);
@@ -140,7 +146,9 @@ export function App() {
         ? loadSettingsPage
         : target === "upload"
           ? loadUploadPage
-          : loadHistoryPage;
+          : target === "notes"
+            ? loadNotesPage
+            : loadHistoryPage;
       void loadTarget().then(startTransition).catch((error) => {
         isTransitioning.current = false;
         console.error(`${target} page load failed:`, error);
@@ -162,7 +170,7 @@ export function App() {
           </div>
           <nav className="app-sidebar-nav">
             <div className="app-sidebar-section-label">{t("app.navFeatures")}</div>
-            {navItems.slice(0, 3).map(({ id, labelKey, icon: Icon }) => (
+            {navItems.slice(0, 4).map(({ id, labelKey, icon: Icon }) => (
               <button
                 key={id}
                 type="button"
@@ -176,7 +184,7 @@ export function App() {
             ))}
           </nav>
           <div className="app-sidebar-footer">
-            {navItems.slice(3).map(({ id, labelKey, icon: Icon }) => (
+            {navItems.slice(4).map(({ id, labelKey, icon: Icon }) => (
               <button
                 key={id}
                 type="button"
@@ -198,6 +206,8 @@ export function App() {
               <SettingsPage onNavigate={navigateTo} active animClass={animClass} />
             ) : view === "upload" ? (
               <UploadPage onNavigate={navigateTo} animClass={animClass} />
+            ) : view === "notes" ? (
+              <NotesPage onNavigate={navigateTo} animClass={animClass} />
             ) : (
               <HistoryPage onNavigate={navigateTo} animClass={animClass} />
             )}

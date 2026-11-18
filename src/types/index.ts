@@ -341,3 +341,4 @@ export interface SelectionAssistantConfig {
   excluded_apps: string[];
 }
 
+export * from "./notes";

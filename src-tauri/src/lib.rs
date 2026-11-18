@@ -375,6 +375,18 @@ pub fn run() {
             commands::history::reveal_history_audio,
             commands::history::export_transcription_history,
             commands::history::reprocess_transcription_history,
+            commands::notes::list_note_folders,
+            commands::notes::create_note_folder,
+            commands::notes::rename_note_folder,
+            commands::notes::delete_note_folder,
+            commands::notes::reorder_note_folders,
+            commands::notes::list_notes,
+            commands::notes::get_note,
+            commands::notes::create_note,
+            commands::notes::update_note,
+            commands::notes::delete_note,
+            commands::notes::move_note,
+            commands::notes::save_text_file,
         ]))
         .run(tauri::generate_context!())
         .expect("启动会听时发生错误");
