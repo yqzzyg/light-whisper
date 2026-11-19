@@ -15,9 +15,8 @@ pub mod jev_tasks;
 pub mod llm_client;
 pub mod llm_provider;
 pub mod model_connection;
-pub mod notes_service;
 pub mod note_recording_service;
-pub mod wav_writer;
+pub mod notes_service;
 mod oauth_callback;
 pub mod profile_service;
 pub mod qwen_hotword_service;
@@ -25,6 +24,7 @@ pub mod screen_capture_service;
 pub mod screen_vision_service;
 pub mod selection_service;
 pub mod transcription_service;
+pub mod wav_writer;
 pub mod web_search_service;
 
 #[cfg(test)]

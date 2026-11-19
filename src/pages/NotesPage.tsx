@@ -4,13 +4,17 @@ import { ArrowLeft, Minus, X } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 
-import { hideMainWindow } from "@/api/tauri";
+import { hideMainWindow, revealNoteAudio } from "@/api/tauri";
 import NoteEditor from "@/components/notes/NoteEditor";
 import NotesSidebar from "@/components/notes/NotesSidebar";
 import RecordingBar from "@/components/notes/RecordingBar";
 import TitleBar from "@/components/TitleBar";
 import { ensureNoteRecordingReady, startRecording, useNoteRecording } from "@/hooks/noteRecordingStore";
-import { transcribeNote, useNoteTranscription } from "@/hooks/noteTranscriptionStore";
+import {
+  transcribeNote,
+  transcribeSegment,
+  useNoteTranscription,
+} from "@/hooks/noteTranscriptionStore";
 import {
   closeNote,
   createFolder,
@@ -23,6 +27,7 @@ import {
   moveNote,
   openNote,
   removeNote,
+  removeNoteRecording,
   renameFolder,
   reorderFolders,
   setActiveFolder,
@@ -102,7 +107,7 @@ export default function NotesPage({
   };
 
   /**
-   * 整段转写。命令可能跑几分钟，但用户在页面上看到的是「已用时 + 预估」，
+   * 转写所有未转写的段。命令可能跑几分钟，但用户看到的是「已用时 + 预估」，
    * 走开了也会照常完成（状态在模块级 store 里，不随组件卸载丢失）。
    */
   const handleTranscribe = async () => {
@@ -113,6 +118,33 @@ export default function NotesPage({
       return;
     }
     toast.success(t("notes.transcribeDone"));
+  };
+
+  /** 只重转一段：已转写的段也允许重来，挑出识别不佳的那一段。 */
+  const handleTranscribeSegment = async (recordingId: number) => {
+    if (!note || transcription.running) return;
+    const error = await transcribeSegment(note.id, recordingId);
+    if (error) {
+      toast.error(t("notes.transcribeFailed", { message: error }));
+      return;
+    }
+    toast.success(t("notes.segmentTranscribeDone"));
+  };
+
+  const handleRevealRecording = async (id: number) => {
+    try {
+      await revealNoteAudio(id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t("notes.revealAudioFailed", { message }));
+    }
+  };
+
+  const handleDeleteRecording = (id: number) => {
+    if (!window.confirm(t("notes.deleteRecordingConfirm"))) return;
+    void removeNoteRecording(id).then((removed) => {
+      if (removed) toast.success(t("notes.recordingDeleted"));
+    });
   };
 
   return (
@@ -180,9 +212,13 @@ export default function NotesPage({
             saving={state.saving}
             untitled={untitled}
             recording={recording}
+            recordings={state.recordings}
             transcription={transcription}
             onStartRecording={() => void handleStartRecording()}
             onTranscribe={() => void handleTranscribe()}
+            onTranscribeSegment={(id) => void handleTranscribeSegment(id)}
+            onRevealRecording={(id) => void handleRevealRecording(id)}
+            onDeleteRecording={handleDeleteRecording}
             onEdit={editNote}
             onFlush={() => void flushNoteSave()}
             onMove={(folderId) => {

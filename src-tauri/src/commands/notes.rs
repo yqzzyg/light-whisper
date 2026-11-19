@@ -3,6 +3,8 @@
 //! 命令层只做薄壳：参数透传给 `notes_service`，业务规则（重名校验、事务边界、
 //! 分页裁剪）都在 service 里，避免两条调用路径各自维护一套规则。
 
+use tauri::Manager;
+
 use crate::services::notes_service;
 use crate::state::AppState;
 use crate::utils::paths;
@@ -65,7 +67,7 @@ pub async fn update_note(
     notes_service::update_note(id, patch).await
 }
 
-/// 删除笔记。返回被删笔记的音频文件名。
+/// 删除笔记。返回被删笔记所有段的音频文件名。
 ///
 /// 正在录这条笔记时先取消录音：否则停止后音频会挂到一行已经不存在的数据上，
 /// 文件也就没人认领了。取消失败不阻止删除，残留文件由启动清理兜底。
@@ -74,18 +76,93 @@ pub async fn delete_note(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: i64,
-) -> Result<Option<String>, String> {
+) -> Result<Option<Vec<String>>, String> {
     if let Err(error) =
         crate::services::note_recording_service::cancel_if_recording_note(&app, state.inner(), id)
             .await
     {
         log::warn!("删除笔记前取消录音失败（继续删除）: {error}");
     }
-    let audio_file = notes_service::delete_note(id).await?;
-    if let Some(file_name) = audio_file.as_deref() {
-        crate::services::note_recording_service::delete_audio_file(file_name);
+    let audio_files = notes_service::delete_note(id).await?;
+    if let Some(files) = audio_files.as_ref() {
+        for file_name in files {
+            crate::services::note_recording_service::delete_audio_file(file_name);
+        }
     }
-    Ok(audio_file)
+    Ok(audio_files)
+}
+
+#[tauri::command]
+pub async fn list_note_recordings(
+    note_id: i64,
+) -> Result<Vec<notes_service::NoteRecording>, String> {
+    notes_service::list_note_recordings(note_id).await
+}
+
+/// 删除一段录音：先删库里的引用，再删磁盘文件。重算聚合转录由 service 完成。
+#[tauri::command]
+pub async fn delete_note_recording(id: i64) -> Result<(), String> {
+    if let Some((_, file_name)) = notes_service::delete_note_recording(id).await? {
+        crate::services::note_recording_service::delete_audio_file(&file_name);
+    }
+    Ok(())
+}
+
+/// 为某段录音生成可在应用内 `<audio>` 播放的 asset URL。
+///
+/// asset 协议的静态 scope 是空的（不给整个数据目录开门），这里按段授权单个
+/// 文件——只有用户明确点了播放的那一段才会被放行，且文件必须真实存在。
+#[tauri::command]
+pub async fn note_recording_audio_url(app: tauri::AppHandle, id: i64) -> Result<String, String> {
+    let recording = notes_service::get_note_recording(id)
+        .await?
+        .ok_or_else(|| "录音片段不存在或已被清理".to_string())?;
+    let path = paths::safe_file_in_dir(&paths::notes_audio_dir(), &recording.audio_file)
+        .ok_or_else(|| "录音文件名非法".to_string())?;
+    if !path.is_file() {
+        return Err("录音文件不存在或已被清理".into());
+    }
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|error| format!("授权播放录音失败: {error}"))?;
+    // convertFileSrc 只需要 plain 路径（去掉 Windows 的 \\?\ 前缀），URL 由前端拼。
+    Ok(paths::strip_win_prefix(&path))
+}
+
+/// 在系统文件管理器中定位某一笔记录音。
+/// Windows 用 explorer /select 选中文件，其它平台打开所在目录。
+#[tauri::command]
+pub async fn reveal_note_audio(id: i64) -> Result<(), String> {
+    let Some(recording) = notes_service::get_note_recording(id).await? else {
+        return Err("录音不存在或已被清理".into());
+    };
+    let Some(path) = paths::safe_file_in_dir(&paths::notes_audio_dir(), &recording.audio_file)
+    else {
+        return Err("录音文件名非法".into());
+    };
+    if !path.is_file() {
+        return Err("录音文件不存在或已被清理".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map_err(|error| format!("打开文件目录失败: {error}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let directory = path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::process::Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| format!("打开文件目录失败: {error}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

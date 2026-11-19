@@ -6,15 +6,17 @@ import {
   createNoteFromHistory as apiCreateNoteFromHistory,
   deleteNote as apiDeleteNote,
   deleteNoteFolder as apiDeleteNoteFolder,
+  deleteNoteRecording as apiDeleteNoteRecording,
   getNote,
   listNoteFolders,
+  listNoteRecordings,
   listNotes,
   moveNote as apiMoveNote,
   renameNoteFolder as apiRenameNoteFolder,
   reorderNoteFolders as apiReorderNoteFolders,
   updateNote as apiUpdateNote,
 } from "@/api/tauri";
-import type { NoteDetail, NoteFolder, NoteListItem, NotePatch } from "@/types/notes";
+import type { NoteDetail, NoteFolder, NoteListItem, NotePatch, NoteRecording } from "@/types/notes";
 
 const PAGE_SIZE = 200;
 /// 自动保存防抖：太短会把每个字符都发一次 IPC，太长会在强制退出时丢字。
@@ -34,6 +36,8 @@ export interface NotesState {
   collapsedFolderIds: number[];
   selectedNoteId: number | null;
   note: NoteDetail | null;
+  /** 当前笔记的录音段，按录音时间正序；与 note 共用同一个请求令牌。 */
+  recordings: NoteRecording[];
   loadingFolders: boolean;
   loadingNotes: boolean;
   loadingNote: boolean;
@@ -52,6 +56,7 @@ const initialState: NotesState = {
   collapsedFolderIds: [],
   selectedNoteId: null,
   note: null,
+  recordings: [],
   loadingFolders: false,
   loadingNotes: false,
   loadingNote: false,
@@ -193,10 +198,11 @@ export async function openNote(id: number): Promise<void> {
   const token = ++noteToken;
   emit({ selectedNoteId: id, loadingNote: true });
   try {
-    const note = await getNote(id);
+    const [note, recordings] = await Promise.all([getNote(id), listNoteRecordings(id)]);
     if (token !== noteToken) return;
     emit({
       note,
+      recordings,
       selectedNoteId: note ? note.id : null,
       activeFolderId: note ? note.folderId : state.activeFolderId,
       loadingNote: false,
@@ -211,14 +217,14 @@ export async function openNote(id: number): Promise<void> {
 export function closeNote(): void {
   void flushNoteSave();
   noteToken += 1;
-  emit({ selectedNoteId: null, note: null, loadingNote: false });
+  emit({ selectedNoteId: null, note: null, recordings: [], loadingNote: false });
 }
 
 /**
  * 重新读取当前打开的笔记，不显示加载骨架。
  *
- * 用于后端改了笔记而前端不知情的场景（停止录音后回填 audioFile/duration、
- * 转写完成写回转录）。先 flush 待保存的编辑，否则这次重读会把刚敲的字覆盖掉。
+ * 用于后端改了笔记而前端不知情的场景（停止录音新增段、转写完成写回转录、
+ * 删除某段后重算聚合）。先 flush 待保存的编辑，否则这次重读会把刚敲的字覆盖掉。
  */
 export async function reloadOpenNote(): Promise<void> {
   const id = state.selectedNoteId;
@@ -226,9 +232,9 @@ export async function reloadOpenNote(): Promise<void> {
   await flushNoteSave();
   const token = ++noteToken;
   try {
-    const note = await getNote(id);
+    const [note, recordings] = await Promise.all([getNote(id), listNoteRecordings(id)]);
     if (token !== noteToken || state.selectedNoteId !== id) return;
-    emit({ note });
+    emit({ note, recordings });
   } catch (error) {
     // 重读失败不影响当前展示，下次打开会重新拉。
     console.warn("刷新笔记失败:", messageOf(error));
@@ -332,7 +338,7 @@ export async function createNote(folderId: number | null): Promise<void> {
     const note = await apiCreateNote(folderId, "", "personal");
     emit({ activeFolderId: folderId, collapsedFolderIds: expandFolder(state.collapsedFolderIds, folderId) });
     await Promise.all([refreshFolders(), refreshNotes(true)]);
-    emit({ selectedNoteId: note.id, note, loadingNote: false, error: null });
+    emit({ selectedNoteId: note.id, note, recordings: [], loadingNote: false, error: null });
   } catch (error) {
     emit({ error: messageOf(error) });
   }
@@ -348,9 +354,11 @@ export async function createNoteFromHistory(historyId: number): Promise<NoteDeta
   await flushNoteSave();
   const note = await apiCreateNoteFromHistory(historyId);
   await Promise.all([refreshFolders(), refreshNotes(true)]);
+  // 历史转存来的笔记没有录音段：音频仍归历史记录。
   emit({
     selectedNoteId: note.id,
     note,
+    recordings: [],
     activeFolderId: note.folderId,
     collapsedFolderIds: expandFolder(state.collapsedFolderIds, note.folderId),
     loadingNote: false,
@@ -380,11 +388,23 @@ export async function removeNote(id: number): Promise<void> {
     await apiDeleteNote(id);
     if (state.selectedNoteId === id) {
       noteToken += 1;
-      emit({ selectedNoteId: null, note: null });
+      emit({ selectedNoteId: null, note: null, recordings: [] });
     }
     await Promise.all([refreshFolders(), refreshNotes(true)]);
   } catch (error) {
     emit({ error: messageOf(error) });
+  }
+}
+
+/** 删除一段录音：后端会重算笔记转录，成功后整篇重读。 */
+export async function removeNoteRecording(id: number): Promise<boolean> {
+  try {
+    await apiDeleteNoteRecording(id);
+    await Promise.all([reloadOpenNote(), refreshNotes(true)]);
+    return true;
+  } catch (error) {
+    emit({ error: messageOf(error) });
+    return false;
   }
 }
 

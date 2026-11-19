@@ -123,8 +123,11 @@ pub async fn transcribe_file(
         .await
         .map_err(|error| format!("{error_prefix}: 读取录音文件失败: {error}"))?
         .len();
-    check_engine_limit(file_len.min(usize::MAX as u64) as usize, duration_sec.unwrap_or(0.0))
-        .map_err(|error| format!("{error_prefix}: {error}"))?;
+    check_engine_limit(
+        file_len.min(usize::MAX as u64) as usize,
+        duration_sec.unwrap_or(0.0),
+    )
+    .map_err(|error| format!("{error_prefix}: {error}"))?;
 
     let audio = tokio::fs::read(path)
         .await

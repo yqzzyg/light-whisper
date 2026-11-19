@@ -372,15 +372,10 @@ fn default_selection_translation_target() -> String {
 }
 
 fn default_selection_excluded_apps() -> Vec<String> {
-    [
-        "minutes.exe",
-        "snipaste.exe",
-        "pixpin.exe",
-        "sharex.exe",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    ["minutes.exe", "snipaste.exe", "pixpin.exe", "sharex.exe"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 impl Default for SelectionAssistantConfig {

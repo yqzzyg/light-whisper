@@ -1,6 +1,9 @@
 import { useSyncExternalStore } from "react";
 
-import { transcribeNoteRecording } from "@/api/tauri";
+import {
+  transcribeNoteRecording,
+  transcribeNoteRecordingSegment,
+} from "@/api/tauri";
 import { reloadOpenNote, refreshNotes } from "@/hooks/notesStore";
 
 /**
@@ -22,6 +25,8 @@ export interface NoteTranscriptionError {
 export interface NoteTranscriptionState {
   /** 正在转写的笔记；空闲时为 `null`。 */
   noteId: number | null;
+  /** 正在转写的录音段；整篇转录或空闲时为 `null`。 */
+  recordingId: number | null;
   running: boolean;
   /** 从开始到现在过了多少秒，由本地计时器推进（后端没有进度事件）。 */
   elapsedSec: number;
@@ -31,6 +36,7 @@ export interface NoteTranscriptionState {
 
 const IDLE: NoteTranscriptionState = {
   noteId: null,
+  recordingId: null,
   running: false,
   elapsedSec: 0,
   error: null,
@@ -98,17 +104,38 @@ export function useNoteTranscription(): NoteTranscriptionState {
  * 双击的竞态，没必要给用户看一句「正在转写」。
  */
 export async function transcribeNote(noteId: number): Promise<string | null> {
+  return runTranscription(noteId, null, () => transcribeNoteRecording(noteId));
+}
+
+/**
+ * 只重转一段录音。段级状态会记下 recordingId，界面据此只在该段显示进度。
+ * 已转写的段也允许重跑（后端不做幂等），挑出识别不佳的单段重来。
+ */
+export async function transcribeSegment(
+  noteId: number,
+  recordingId: number,
+): Promise<string | null> {
+  return runTranscription(noteId, recordingId, () =>
+    transcribeNoteRecordingSegment(recordingId),
+  );
+}
+
+async function runTranscription(
+  noteId: number,
+  recordingId: number | null,
+  invoke: () => Promise<unknown>,
+): Promise<string | null> {
   if (state.running) return null;
 
   startedAt = Date.now();
   stopTicker();
-  emit({ noteId, running: true, elapsedSec: 0, error: null });
+  emit({ noteId, recordingId, running: true, elapsedSec: 0, error: null });
   ticker = setInterval(() => {
     emit({ elapsedSec: Math.floor((Date.now() - startedAt) / 1000) });
   }, 1000);
 
   try {
-    await transcribeNoteRecording(noteId);
+    await invoke();
     // 转录与 history_id 由后端写库：打开中的笔记与侧栏摘要都要重读。
     void reloadOpenNote();
     void refreshNotes(true);
@@ -119,7 +146,7 @@ export async function transcribeNote(noteId: number): Promise<string | null> {
     return message;
   } finally {
     stopTicker();
-    emit({ noteId: null, running: false, elapsedSec: 0 });
+    emit({ noteId: null, recordingId: null, running: false, elapsedSec: 0 });
   }
 }
 

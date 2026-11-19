@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -6,14 +7,17 @@ import {
   Copy,
   Download,
   FileText,
+  FolderOpen,
   LoaderCircle,
   Mic,
+  Pause,
+  Play,
   Sparkles,
   Trash2,
   X,
 } from "lucide-react";
 
-import { copyToClipboard, saveTextFile } from "@/api/tauri";
+import { copyToClipboard, getNoteRecordingAudioUrl, saveTextFile } from "@/api/tauri";
 import MarkdownContent from "@/components/MarkdownContent";
 import MarkdownEditor from "@/components/notes/MarkdownEditor";
 import { formatDuration } from "@/lib/duration";
@@ -21,7 +25,13 @@ import {
   estimateTranscribeSeconds,
   type NoteTranscriptionState,
 } from "@/hooks/noteTranscriptionStore";
-import type { NoteDetail, NoteFolder, NotePatch, NoteRecordingSnapshot } from "@/types/notes";
+import type {
+  NoteDetail,
+  NoteFolder,
+  NotePatch,
+  NoteRecording,
+  NoteRecordingSnapshot,
+} from "@/types/notes";
 
 type Tab = "content" | "transcript" | "summary";
 
@@ -84,10 +94,15 @@ export interface NoteEditorProps {
   untitled: string;
   /** 会议录音状态：用于禁用「录音」按钮与显示「已录制未转写」。 */
   recording: NoteRecordingSnapshot;
+  /** 这条笔记的所有录音段。 */
+  recordings: NoteRecording[];
   /** 转写状态：跨页面保留，切回来仍在跑。 */
   transcription: NoteTranscriptionState;
   onStartRecording: () => void;
   onTranscribe: () => void;
+  onTranscribeSegment: (recordingId: number) => void;
+  onRevealRecording: (id: number) => void;
+  onDeleteRecording: (id: number) => void;
   onEdit: (patch: NotePatch) => void;
   onFlush: () => void;
   onMove: (folderId: number | null) => void;
@@ -102,9 +117,13 @@ export default function NoteEditor({
   saving,
   untitled,
   recording,
+  recordings,
   transcription,
   onStartRecording,
   onTranscribe,
+  onTranscribeSegment,
+  onRevealRecording,
+  onDeleteRecording,
   onEdit,
   onFlush,
   onMove,
@@ -113,11 +132,29 @@ export default function NoteEditor({
 }: NoteEditorProps) {
   const { t, i18n } = useTranslation();
   const [tab, setTab] = useState<Tab>("content");
+  /** 正在播放的段 id 与其 asset URL；同一时刻只展开一个播放器。 */
+  const [playing, setPlaying] = useState<{ id: number; url: string } | null>(null);
 
-  // 换一条笔记时回到正文 tab：上一条停在哪一页对这条没有意义。
+  // 换一条笔记时回到正文 tab，并收起播放器：上一条的状态对这条没有意义。
   useEffect(() => {
     setTab("content");
+    setPlaying(null);
   }, [note?.id]);
+
+  /** 解析该段的本地路径并转成 asset URL，展开原生播放器自动开始播放。 */
+  const playRecording = async (id: number) => {
+    if (playing?.id === id) {
+      setPlaying(null);
+      return;
+    }
+    try {
+      const path = await getNoteRecordingAudioUrl(id);
+      setPlaying({ id, url: convertFileSrc(path) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t("notes.playAudioFailed", { message }));
+    }
+  };
 
   if (!note) {
     return (
@@ -150,8 +187,17 @@ export default function NoteEditor({
     !transcription.running && transcription.error?.noteId === note.id
       ? transcription.error.message
       : null;
-  const estimate = estimateTranscribeSeconds(note.durationSec);
-  const transcriptPending = Boolean(note.audioFile) && !transcript.trim();
+  const pendingRecordings = recordings.filter((item) => !item.transcript?.trim());
+  const pendingDuration = pendingRecordings.reduce(
+    (sum, item) => sum + (item.durationSec ?? 0),
+    0,
+  );
+  const estimate = estimateTranscribeSeconds(
+    pendingDuration > 0 ? pendingDuration : note.durationSec,
+  );
+  // 是否还有段没转写：只有段表是录音的事实源（`notes.audio_file` 迁移后恒为空，
+  // 不再参与判断）。从历史转存来的笔记没有段，也不会误判成待转写。
+  const transcriptPending = pendingRecordings.length > 0;
   const updatedLabel = new Intl.DateTimeFormat(i18n.language, {
     month: "short",
     day: "numeric",
@@ -307,16 +353,16 @@ export default function NoteEditor({
         <div className="notes-panel">
           {/* 从历史/上传转来的笔记：音频留在历史记录里，这里要说清去哪听，
               否则用户会以为录音丢了。 */}
-          {note.historyId && !note.audioFile && (
+          {note.historyId && recordings.length === 0 && (
             <p className="notes-audio-hint">{t("notes.audioInHistory")}</p>
           )}
-          {/* 先录后转：录音已经在本地，但还没有转录，说清「有什么、缺什么」，
-              并且给出唯一的下一步——转文字。 */}
-          {note.audioFile && !transcript.trim() && (
+          {/* 先录后转：录音已经在本地但还没转录，说清「有什么、缺什么」，
+              并给出唯一的下一步——把待转写的段转成文字。 */}
+          {transcriptPending && (
             <div className="notes-transcribe">
               <p className="notes-audio-hint">
                 {t("notes.recordedNotTranscribed", {
-                  duration: formatDuration(note.durationSec),
+                  duration: formatDuration(pendingDuration > 0 ? pendingDuration : note.durationSec),
                 })}
               </p>
               {isTranscribing ? (
@@ -382,6 +428,95 @@ export default function NoteEditor({
               {t("notes.exportTxt")}
             </button>
           </div>
+          {recordings.length > 0 && (
+            <div className="notes-recordings">
+              <div className="notes-recordings-head">{t("notes.recordings")}</div>
+              {recordings.map((item, index) => {
+                const done = Boolean(item.transcript?.trim());
+                const thisTranscribing =
+                  isTranscribing && transcription.recordingId === item.id;
+                const canAct = !transcription.running;
+                const isPlaying = playing?.id === item.id;
+                return (
+                  <div key={item.id}>
+                    <div className="notes-recording-row">
+                      <span className="notes-recording-index">{index + 1}</span>
+                      <span className="notes-recording-duration">
+                        {formatDuration(item.durationSec)}
+                      </span>
+                      <span
+                        className="notes-recording-status"
+                        data-pending={!done}
+                      >
+                        {thisTranscribing
+                          ? t("notes.segmentTranscribing")
+                          : t(done ? "notes.hasTranscript" : "notes.notTranscribed")}
+                      </span>
+                      <span className="notes-recording-spacer" />
+                      {/* 应用内播放：点一下展开原生播放器，再点收起。 */}
+                      <button
+                        type="button"
+                        className="notes-toolbar-btn"
+                        data-active={isPlaying}
+                        title={t(isPlaying ? "notes.stopPlayAudio" : "notes.playAudio")}
+                        aria-label={t(isPlaying ? "notes.stopPlayAudio" : "notes.playAudio")}
+                        onClick={() => void playRecording(item.id)}
+                      >
+                        {isPlaying ? <Pause size={12} /> : <Play size={12} />}
+                      </button>
+                      {/* 单段重转：已转写的段也能重来，挑出识别不佳的那一段。 */}
+                      <button
+                        type="button"
+                        className="notes-toolbar-btn"
+                        disabled={!canAct}
+                        title={t(done ? "notes.retranscribeSegment" : "notes.transcribeSegment")}
+                        aria-label={t(done ? "notes.retranscribeSegment" : "notes.transcribeSegment")}
+                        onClick={() => onTranscribeSegment(item.id)}
+                      >
+                        {thisTranscribing ? (
+                          <LoaderCircle size={12} className="animate-spin" />
+                        ) : (
+                          <AudioLines size={12} />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="notes-toolbar-btn"
+                        title={t("notes.revealAudio")}
+                        aria-label={t("notes.revealAudio")}
+                        onClick={() => onRevealRecording(item.id)}
+                      >
+                        <FolderOpen size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        className="notes-toolbar-btn"
+                        disabled={!canAct}
+                        title={t("notes.deleteRecording")}
+                        aria-label={t("notes.deleteRecording")}
+                        onClick={() => onDeleteRecording(item.id)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                    {isPlaying && (
+                      <div className="notes-recording-player">
+                        {/* 会议录音是纯音频，没有 WebVTT 字幕轨；文字转录在同一页的
+                            转录区展示，这里不需要（也无法）挂 <track>。 */}
+                        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                        <audio
+                          controls
+                          autoPlay
+                          src={playing.url}
+                          onEnded={() => setPlaying(null)}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {transcript.trim() ? (
             <div className="notes-panel-scroll">
               <p className="notes-transcript-text">{transcript}</p>

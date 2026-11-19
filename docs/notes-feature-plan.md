@@ -160,7 +160,7 @@ list_notes(folder_id: Option, query: Option, limit, offset)
 get_note(id) / create_note(folder_id, title, kind) / update_note(id, patch) / delete_note(id)
 move_note(id, folder_id)
 attach_transcript(note_id, history_id)   -- 从历史记录生成笔记
-set_transcript(note_id, text, duration_sec, history_id)
+set_note_recording_transcript(recording_id, text, history_id)   -- 段级；P3 多段录音上线后取代单槽 set_transcript
 ```
 
 新增 `services/note_summary_service.rs`（约 350–450 行）：
@@ -248,7 +248,7 @@ history_id = history_service::insert(HistoryDraft {
                  mode: "note", workflow: "note",
                  audio_file: None,               -- 音频归笔记，历史只做文本记录
                  ... })
-notes_service::set_transcript(note_id, text, duration_sec, Some(history_id))
+notes_service::set_note_recording_transcript(recording_id, text, Some(history_id))
 ```
 
 命令约 25 行，只做「取路径 → 调转写 → 写历史 → 回填笔记」。
@@ -418,7 +418,7 @@ notes_service::set_transcript(note_id, text, duration_sec, Some(history_id))
 - [x] `funasr_service::transcribe_path`：直接下发 `audio_path`（不加锁以外的额外拷贝，复用现有预算与超时）
 - [x] `transcription_service::transcribe_file`：分派本地/在线 + 在线上限 + 错误归一
 - [x] `check_engine_limit` 迁入 service，`audio_import.rs` 改为调用它（行为与文案不变）
-- [x] `transcribe_note_recording` 命令：取路径 → 转写 → `insert(mode="note", audio_file=None)` → `set_transcript`
+- [x] `transcribe_note_recording` 命令：逐段取路径 → 转写 → `insert(mode="note", audio_file=None)` → `set_note_recording_transcript`
 - [x] 「转文字」按钮 / 已用时与预估 / 失败提示 / 幂等重试（重复点不产生第二条历史）
 - 验收（功能）：同一段录音点两次「转文字」结果一致、历史只有一条；转写中切页回来仍在跑
 - 验收（无复制）：转写前后 `notes_audio` 与 `history_audio` 都不新增文件；历史行 `audio_file` 为 `NULL`，历史详情提示「录音在笔记中」
@@ -432,6 +432,19 @@ notes_service::set_transcript(note_id, text, duration_sec, Some(history_id))
   - **在线引擎先看文件元数据再读字节**：GLM 的 30 秒与 DashScope 的 10MB 判据都能在 `metadata().len()` 上判，避免为了一句超限提示把上百兆读进内存。
   - **历史行的 `session_id` 用毫秒时间戳**（笔记没有录音会话 ID），与导入同一套做法。
   - 历史页新增 `note` 模式文案与「录音保存在笔记里」提示；从历史跳到笔记需要 `history_id → note` 反查命令，列入 P5。
+
+追加（2026-11-19）：一条笔记保留多段录音
+
+- 用户确认产品语义：同一条笔记再次录音**不覆盖**，而是新增一段。原设计的 `notes.audio_file` 单槽会在第二次 stop 时把旧段变孤儿，且 `transcript` 非空导致新段永远不会被转写。
+- schema 升到 `user_version=2`：新增 `note_recordings`（note_id / audio_file / duration_sec / transcript / history_id / sort_order / created_at）。迁移在同一 IMMEDIATE 事务里把老 `notes.audio_file` 非空的行灌成一段，再置空旧列；之后 `notes` 不再持有音频引用。
+- 每次 start/stop 追加一段；删笔记返回**所有**段文件名交给录音侧清理；启动孤儿清理的引用集合改读段表；删除单段时删文件并重算聚合。
+- 「转文字」改为**段级幂等**：只转 `transcript` 为空的段，每段一条 `history(mode="note", audio_file=NULL)`，成功后写段转录；最后把段转录按 `\n\n` 拼回 `notes.transcript`、时长求和。中途失败保留已成功段，重试只补未转的；并发仍由 `AppState.note_transcription` 按笔记 ID 挡。
+- 笔记页转录 tab 增加分段列表（序号 / 时长 / 状态 / 在文件夹中显示 / 删除段），解决「转录后找不到录音文件」——文件一直在 `notes_audio/`，只是原先界面没有任何入口。P2 历史转存来的笔记没有段，继续显示「录音在历史记录中」。
+
+追加（2026-11-19，界面反馈）：分段列表支持**应用内直接播放**与**单段转录**。
+- 播放走 Tauri asset protocol：`tauri.conf.json` 开 `app.security.assetProtocol`（静态 scope 留空）+ Cargo 启 `protocol-asset` feature；CSP 加 `media-src 'self' asset: http://asset.localhost blob: data:`。新增 `note_recording_audio_url(recording_id)`：校验段与文件后按文件调 `asset_protocol_scope().allow_file()`（最小权限，不开放整个数据目录），返回 plain 路径，前端 `convertFileSrc` 转 URL 后喂给原生 `<audio autoplay controls>`；同一时刻只展开一个播放器。
+- 单段转录新增 `transcribe_note_recording_segment(recording_id)`，与整篇共用 `transcribe_one_recording`（校验路径 → 引擎 → 写历史 → 写段转录）。**单段不看幂等**：已转写的段也允许重跑，挑识别不佳的重来；重转新增一条历史（历史是追加日志，不删旧的）。并发仍按 note_id 占位。前端 `noteTranscriptionState` 加 `recordingId`，只在该段显示进度。
+- 已知取舍：多段笔记的 `notes.history_id` 留空（每段各自写历史），所以 P5 的「历史 → 笔记反查跳转」需要按段表的 `history_id` 适配。
 
 ### P4 AI 摘要生成（手动触发）
 
@@ -487,3 +500,4 @@ notes_service::set_transcript(note_id, text, duration_sec, Some(history_id))
 6. 转写时机：**停止录音只保存文件，用户点「转文字」才转写**。好处是录坏/录空的不浪费算力、失败重试就是再点一次、不用引入「待转写」中间态。
 7. 转写复用的粒度：**不做全量收口**。现存三处分派是三种执行策略（听写兜底 / 上传页 interim 预览 / 历史重新识别），合成一个带回调的万能函数，省下的只是每处 6 行 `match`，却把两条主流程的回归面绑在一起。只加一个窄接口 `transcription_service::transcribe_file(path, duration)`：本地引擎经新增的 `funasr_service::transcribe_path` **直接下发文件路径**（Python 端 `ServerCommand::Transcribe` 已支持 `audio_path`，不读字节、不写临时文件），在线引擎走 `check_engine_limit` + 既有在线 service。
 8. 音频归属：录音写进**独立目录 `notes_audio/`**，`notes.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（`history_service.rs:297-303` 先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
+9. 多段语义（2026-11-19 修订第 8 条）：一条笔记的多次录音**全部保留**，由 `note_recordings` 子表持有；`notes.audio_file` 单槽在迁移后置空、不再写入。选子表而非把多段塞进 JSON：要按段查未转写、按段删、给启动 GC 提供引用集合。转录是段级幂等 + 拼接，不做整段合并转写（那要在磁盘临时拼 WAV，违背零复制，且失败无法单段重试）。

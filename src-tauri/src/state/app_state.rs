@@ -591,7 +591,8 @@ pub struct AppState {
 /// 会议录音的互斥占位：`Some` 表示正在录，同一时刻只允许一个会话。
 #[derive(Default)]
 pub struct NoteCaptureState {
-    pub session: Arc<parking_lot::Mutex<Option<crate::services::note_recording_service::NoteCapture>>>,
+    pub session:
+        Arc<parking_lot::Mutex<Option<crate::services::note_recording_service::NoteCapture>>>,
     /// 启动中的占位。`session` 的检查与写入之间隔着 `await`（起麦克风、建文件），
     /// 连点两次会让两个会话都通过检查，所以用原子位把这段窗口也一并挡住。
     pub starting: AtomicBool,

@@ -3615,6 +3615,69 @@ select:disabled { cursor: not-allowed; opacity: 0.6; }
   cursor: default;
 }
 
+/* 播放按钮激活（播放器展开）时高亮，提示再点一下可收起。 */
+.notes-toolbar-btn[data-active="true"] {
+  background: var(--color-bg-sunken);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* 多段录音：每段一行，状态、定位与删除入口都在这里。 */
+.notes-recordings {
+  margin: 10px 24px 0;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+}
+
+.notes-recordings-head {
+  padding: 5px 10px;
+  font-size: var(--text-2xs);
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-secondary);
+}
+
+.notes-recording-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--color-border-subtle);
+  font-size: var(--text-2xs);
+  color: var(--color-text-secondary);
+}
+
+.notes-recording-index {
+  width: 18px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+}
+
+.notes-recording-duration {
+  font-variant-numeric: tabular-nums;
+}
+
+.notes-recording-status[data-pending="true"] {
+  color: var(--color-warning);
+}
+
+.notes-recording-spacer {
+  flex: 1;
+}
+
+/* 点播放后在段行下方展开原生播放器，宽度跟随容器。 */
+.notes-recording-player {
+  padding: 6px 10px 8px 34px;
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-secondary);
+}
+
+.notes-recording-player audio {
+  display: block;
+  width: 100%;
+  height: 32px;
+}
+
 .notes-panel-scroll {
   flex: 1;
   min-height: 0;

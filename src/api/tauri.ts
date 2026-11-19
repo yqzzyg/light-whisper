@@ -31,6 +31,7 @@ import type {
   NotePage,
   NotePatch,
   NoteQuery,
+  NoteRecording,
   NoteRecordingSnapshot,
   PersistentHistoryFilter,
   PersistentHistoryPage,
@@ -775,9 +776,9 @@ export function updateNote(id: number, patch: NotePatch): Promise<NoteDetail | n
   return invokeCommand<NoteDetail | null>("update_note", { id, patch });
 }
 
-/** 删除笔记，返回被删笔记的音频文件名（P3 起由录音侧清理）。 */
-export function deleteNote(id: number): Promise<string | null> {
-  return invokeCommand<string | null>("delete_note", { id });
+/** 删除笔记，返回它所有段的音频文件名（由录音侧负责清理磁盘）。 */
+export function deleteNote(id: number): Promise<string[] | null> {
+  return invokeCommand<string[] | null>("delete_note", { id });
 }
 
 export function moveNote(id: number, folderId: number | null): Promise<NoteDetail | null> {
@@ -793,6 +794,34 @@ export function createNoteFromHistory(
   folderId: number | null = null
 ): Promise<NoteDetail> {
   return invokeCommand<NoteDetail>("create_note_from_history", { historyId, folderId });
+}
+
+/** 列出一条笔记的所有录音段，按录音时间正序。 */
+export function listNoteRecordings(noteId: number): Promise<NoteRecording[]> {
+  return invokeCommand<NoteRecording[]>("list_note_recordings", { noteId });
+}
+
+/** 删除一段录音及其磁盘文件；笔记转录会去掉这一段的文字。 */
+export function deleteNoteRecording(id: number): Promise<void> {
+  return invokeCommand<void>("delete_note_recording", { id });
+}
+
+/** 在系统文件管理器中定位某段录音。 */
+export function revealNoteAudio(id: number): Promise<void> {
+  return invokeCommand<void>("reveal_note_audio", { id });
+}
+
+/**
+ * 取某段录音的本地绝对路径（后端只放行这一个文件到 asset 协议）。
+ * 前端用 convertFileSrc 转成可播放 URL；文件不存在时抛错。
+ */
+export function getNoteRecordingAudioUrl(id: number): Promise<string> {
+  return invokeCommand<string>("note_recording_audio_url", { id });
+}
+
+/** 只重转指定的一段录音，不碰其它段；返回更新后的笔记。 */
+export function transcribeNoteRecordingSegment(recordingId: number): Promise<NoteDetail> {
+  return invokeCommand<NoteDetail>("transcribe_note_recording_segment", { recordingId });
 }
 
 /** 弹保存对话框把文本写到用户选的位置；用户取消时返回 null。 */
@@ -829,10 +858,10 @@ export function getNoteRecordingState(): Promise<NoteRecordingSnapshot> {
 // ---------------------------------------------------------------------------
 
 /**
- * 把笔记的会议录音整段转成文字，返回更新后的笔记。
+ * 转写这篇笔记里所有还没转写的录音段，返回更新后的笔记。
  *
- * 后端直接把录音路径交给引擎，不复制音频；笔记已有转录时幂等返回，重复点不会
- * 重跑 ASR，也不会多一条历史。长会议可能要几分钟，期间前端可以切走。
+ * 后端直接把录音路径交给引擎，不复制音频；每段只写一条历史，已转写的段直接
+ * 跳过。长会议可能要几分钟，期间前端可以切走。
  */
 export function transcribeNoteRecording(noteId: number): Promise<NoteDetail> {
   return invokeCommand<NoteDetail>("transcribe_note_recording", { noteId });

@@ -16,7 +16,7 @@ sha2 = "0.10"
 
 [dependencies]
 # Tauri 核心
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-log = "2"
 tauri-plugin-autostart = "2"

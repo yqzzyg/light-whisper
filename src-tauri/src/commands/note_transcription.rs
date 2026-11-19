@@ -4,10 +4,10 @@
 //!
 //! - **不复制音频**：直接把 `notes_audio/` 里的文件路径交给引擎，历史行
 //!   `audio_file` 留空（音频归笔记，不归历史）。
-//! - **幂等**：笔记已有转录就直接返回，重复点不会重跑 ASR、也不会多一条历史。
+//! - **段级幂等**：一条笔记可以有多段录音；每段 `transcript` 非空就跳过，
+//!   重复点不会重跑 ASR、也不会多一条历史。
 //! - **一次一条**：`AppState::note_transcription` 挡住连点造成的并发转写。
-//! - **失败不落历史**：转写失败时笔记原样保留（录音还在，按钮回到可重试），
-//!   不写半条空历史；失败原因由命令返回给前端就地展示。
+//! - **失败不落历史**：转写失败的段不写历史；之前成功的段保留，重试只补没转的。
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -67,10 +67,85 @@ fn history_draft_for_note(
     }
 }
 
-/// 把笔记的会议录音整段转成文本。
+/// 一次转写运行里不变的上下文：引擎、保留策略、起始时刻。
 ///
-/// 返回更新后的笔记（含转录与 `history_id`）。转写期间可以切走页面：
-/// 命令本身不会被取消，前端回到笔记时重读即可看到结果。
+/// 打包成结构体而不是一路传参，是因为整篇转写和单段重转都要带同一批值；
+/// 分开传会让内部函数长到 8 个参数（clippy `too_many_arguments`）。
+struct TranscribeRun<'a> {
+    app: &'a tauri::AppHandle,
+    state: &'a AppState,
+    engine: String,
+    retention_days: u32,
+    /// 整批任务的开始时刻，每段历史的 `total_ms` 从这里算起。
+    started: Instant,
+}
+
+impl TranscribeRun<'_> {
+    /// 转写一段录音：校验路径 → 调引擎 → 写一条历史 → 把转录写回该段。
+    ///
+    /// 整篇转写与单段重转共用这一段逻辑。
+    async fn transcribe(
+        &self,
+        recording: &notes_service::NoteRecording,
+        error_prefix: &str,
+        session_id: u64,
+    ) -> Result<(), AppError> {
+        let path = paths::safe_file_in_dir(&paths::notes_audio_dir(), &recording.audio_file)
+            .ok_or_else(|| AppError::Asr(format!("{error_prefix}：录音文件名非法")))?;
+        if !path.is_file() {
+            return Err(AppError::Asr(format!(
+                "{error_prefix}：录音文件已不存在，可能已被清理，请重新录音"
+            )));
+        }
+
+        let asr_started = Instant::now();
+        let result = transcription_service::transcribe_file(
+            self.app,
+            self.state,
+            &path,
+            recording.duration_sec,
+            error_prefix,
+        )
+        .await
+        .map_err(AppError::Asr)?;
+        let asr_ms = Some(elapsed_ms(asr_started));
+
+        let text = result.text.trim().to_string();
+        if text.is_empty() {
+            return Err(AppError::Asr(format!(
+                "{error_prefix}：这段录音没有识别出文字，请确认录音里有声音后重试"
+            )));
+        }
+
+        let draft = history_draft_for_note(
+            session_id,
+            &text,
+            recording.duration_sec,
+            result.language,
+            self.engine.clone(),
+            asr_ms,
+            Some(elapsed_ms(self.started)),
+        );
+        let history_id = history_service::insert(draft, self.retention_days)
+            .await
+            .map_err(|error| AppError::Asr(format!("保存转写历史失败: {error}")))?;
+
+        notes_service::set_note_recording_transcript(recording.id, &text, Some(history_id))
+            .await
+            .map_err(AppError::Asr)?
+            .ok_or_else(|| AppError::Asr(format!("{error_prefix}：这篇笔记已被删除")))?;
+        let _ = self
+            .app
+            .emit("history-updated", serde_json::json!({ "id": history_id }));
+        Ok(())
+    }
+}
+
+/// 把一篇笔记里所有还没转写的录音段转成文本。
+///
+/// 段与段顺序执行，每段写一条 `mode="note"` 历史与段转录；全部完成后笔记的
+/// `transcript` 是各段拼接的结果。转写期间可以切走页面：命令本身不会被取消，
+/// 前端回到笔记时重读即可看到结果。
 #[tauri::command]
 pub async fn transcribe_note_recording(
     app: tauri::AppHandle,
@@ -82,24 +157,23 @@ pub async fn transcribe_note_recording(
         .map_err(AppError::Asr)?
         .ok_or_else(|| AppError::Asr("笔记不存在，可能已被删除".into()))?;
 
-    // 幂等分支放在拿占位之前：已有转录时连占位都不该占用，重复点瞬间返回。
-    if note
-        .transcript
-        .as_deref()
-        .is_some_and(|text| !text.trim().is_empty())
-    {
+    let recordings = notes_service::list_note_recordings(note_id)
+        .await
+        .map_err(AppError::Asr)?;
+    // 带上段在笔记里的真实序号：待转写的不一定是第 1 段，报错时要说对是哪一段。
+    let pending: Vec<(usize, &notes_service::NoteRecording)> = recordings
+        .iter()
+        .enumerate()
+        .filter(|(_, recording)| {
+            recording
+                .transcript
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+        })
+        .collect();
+    // 没有待转写的段就直接返回：包括 P2 从历史转存来的笔记（音频不在笔记里）。
+    if pending.is_empty() {
         return Ok(note);
-    }
-
-    let Some(file_name) = note.audio_file.clone() else {
-        return Err(AppError::Asr("这条笔记还没有录音，无法转写".into()));
-    };
-    let path = paths::safe_file_in_dir(&paths::notes_audio_dir(), &file_name)
-        .ok_or_else(|| AppError::Asr("录音文件名非法".into()))?;
-    if !path.is_file() {
-        return Err(AppError::Asr(
-            "录音文件已不存在，可能已被清理，请重新录音".into(),
-        ));
     }
 
     let _guard = state.note_transcription.try_begin(note_id).ok_or_else(|| {
@@ -110,49 +184,64 @@ pub async fn transcribe_note_recording(
         }
     })?;
 
-    let started = Instant::now();
-    let engine = paths::read_engine_config();
-    let asr_started = Instant::now();
-    let result = transcription_service::transcribe_file(
-        &app,
-        state.inner(),
-        &path,
-        note.duration_sec,
-        "笔记转写失败",
-    )
-    .await
-    .map_err(AppError::Asr)?;
-    let asr_ms = Some(elapsed_ms(asr_started));
+    let run = TranscribeRun {
+        app: &app,
+        state: state.inner(),
+        engine: paths::read_engine_config(),
+        retention_days: state.with_profile(|profile| profile.history_settings.retention_days),
+        started: Instant::now(),
+    };
 
-    let text = result.text.trim().to_string();
-    if text.is_empty() {
-        return Err(AppError::Asr(
-            "这段录音没有识别出文字，请确认录音里有声音后重试".into(),
-        ));
+    for (index, (position, recording)) in pending.iter().enumerate() {
+        let label = format!("笔记第 {} 段转写失败", position + 1);
+        let session_id = now_millis_u64().saturating_add(index as u64);
+        run.transcribe(recording, &label, session_id).await?;
     }
 
-    let total_ms = Some(elapsed_ms(started));
-    let retention_days = state.with_profile(|profile| profile.history_settings.retention_days);
-    let draft = history_draft_for_note(
-        now_millis_u64(),
-        &text,
-        note.duration_sec,
-        result.language,
-        engine,
-        asr_ms,
-        total_ms,
-    );
-    let history_id = history_service::insert(draft, retention_days)
-        .await
-        .map_err(|error| AppError::Asr(format!("保存转写历史失败: {error}")))?;
-
-    let updated = notes_service::set_transcript(note_id, &text, note.duration_sec, Some(history_id))
+    notes_service::get_note(note_id)
         .await
         .map_err(AppError::Asr)?
-        .ok_or_else(|| AppError::Asr("转写完成，但这篇笔记已被删除".into()))?;
+        .ok_or_else(|| AppError::Asr("转写完成，但这篇笔记已被删除".into()))
+}
 
-    let _ = app.emit("history-updated", serde_json::json!({ "id": history_id }));
-    Ok(updated)
+/// 只重转指定的一段录音。
+///
+/// 与整篇转录的区别：这里**不看幂等**——段的 `transcript` 已存在也要重跑，供
+/// 用户挑出识别不佳的单段重来。并发仍按 note_id 占位，避免与整篇转录互相踩。
+/// 重转会新增一条历史记录（历史是追加日志），不删旧的那条。
+#[tauri::command]
+pub async fn transcribe_note_recording_segment(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    recording_id: i64,
+) -> Result<notes_service::NoteDetail, AppError> {
+    let recording = notes_service::get_note_recording(recording_id)
+        .await
+        .map_err(AppError::Asr)?
+        .ok_or_else(|| AppError::Asr("录音片段不存在或已被删除".into()))?;
+    let note_id = recording.note_id;
+
+    let _guard = state.note_transcription.try_begin(note_id).ok_or_else(|| {
+        match state.note_transcription.active_note() {
+            Some(active) if active == note_id => AppError::Asr("这篇笔记正在转写中，请稍候".into()),
+            _ => AppError::Asr("已有另一篇笔记正在转写，请等它完成再试".into()),
+        }
+    })?;
+
+    let run = TranscribeRun {
+        app: &app,
+        state: state.inner(),
+        engine: paths::read_engine_config(),
+        retention_days: state.with_profile(|profile| profile.history_settings.retention_days),
+        started: Instant::now(),
+    };
+    run.transcribe(&recording, "这段录音转写失败", now_millis_u64())
+        .await?;
+
+    notes_service::get_note(note_id)
+        .await
+        .map_err(AppError::Asr)?
+        .ok_or_else(|| AppError::Asr("转写完成，但这篇笔记已被删除".into()))
 }
 
 #[cfg(test)]
@@ -186,6 +275,9 @@ mod tests {
     fn note_history_session_id_is_timestamp_like() {
         // 笔记没有录音会话 ID 可用，用毫秒时间戳避免与听写会话（1、2、3…）撞号。
         let id = now_millis_u64();
-        assert!(id > 1_000_000, "note session id should be timestamp-like: {id}");
+        assert!(
+            id > 1_000_000,
+            "note session id should be timestamp-like: {id}"
+        );
     }
 }

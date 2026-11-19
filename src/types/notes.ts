@@ -36,9 +36,25 @@ export interface NoteDetail {
   kind: NoteKind;
   durationSec: number | null;
   historyId: number | null;
+  /**
+   * @deprecated 录音已改由段表 `NoteRecording` 持有，后端迁移后此列恒为 `null`。
+   * 判断「有没有录音」请用 `recordings`，不要再读这个字段。
+   */
   audioFile: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 一条笔记里的一段录音：一次 start/stop 就是一段，独立文件、独立转录。 */
+export interface NoteRecording {
+  id: number;
+  noteId: number;
+  audioFile: string;
+  durationSec: number | null;
+  transcript: string | null;
+  historyId: number | null;
+  sortOrder: number;
+  createdAt: number;
 }
 
 export interface NotePage {

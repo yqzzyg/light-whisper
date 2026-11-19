@@ -152,7 +152,10 @@ fn drain_samples(
         .map(|sample| sample.unsigned_abs())
         .max()
         .unwrap_or(0);
-    level.store((f32::from(peak) / f32::from(i16::MAX)).to_bits(), Ordering::Release);
+    level.store(
+        (f32::from(peak) / f32::from(i16::MAX)).to_bits(),
+        Ordering::Release,
+    );
 
     let converted = match resampler.push_i16(&chunk) {
         Ok(converted) => converted,
@@ -354,7 +357,8 @@ pub async fn stop(app: &AppHandle, state: &AppState) -> Result<NoteRecordingSnap
     let (capture, duration) = finalize_capture(capture).await?;
     let write_error = capture.error.lock().clone();
 
-    notes_service::set_audio(capture.note_id, Some(&capture.file_name), Some(duration)).await?;
+    // 每次 stop 都是新的一段：不再覆盖 note 上可能的旧录音。
+    notes_service::add_note_recording(capture.note_id, &capture.file_name, Some(duration)).await?;
 
     let snapshot = NoteRecordingSnapshot {
         active: false,
@@ -499,7 +503,10 @@ mod tests {
 
         assert!(samples.lock().is_empty(), "缓冲必须被排空");
         let peak = f32::from_bits(level.load(Ordering::Acquire));
-        assert!((peak - 3_000.0 / 32_767.0).abs() < 1e-6, "峰值电平不对: {peak}");
+        assert!(
+            (peak - 3_000.0 / 32_767.0).abs() < 1e-6,
+            "峰值电平不对: {peak}"
+        );
         assert!(error.lock().is_none());
 
         let duration = writer.lock().take().unwrap().finish().unwrap();

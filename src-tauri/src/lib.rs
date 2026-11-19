@@ -51,10 +51,7 @@ pub fn run() {
             }
 
             let app_handle = app.handle().clone();
-            log::info!(
-                "会听应用启动，数据目录: {:?}",
-                utils::paths::get_data_dir()
-            );
+            log::info!("会听应用启动，数据目录: {:?}", utils::paths::get_data_dir());
 
             // 启动时加载用户画像
             {
@@ -397,12 +394,17 @@ pub fn run() {
             commands::notes::delete_note,
             commands::notes::move_note,
             commands::notes::create_note_from_history,
+            commands::notes::list_note_recordings,
+            commands::notes::delete_note_recording,
+            commands::notes::reveal_note_audio,
+            commands::notes::note_recording_audio_url,
             commands::notes::save_text_file,
             commands::note_recording::start_note_recording,
             commands::note_recording::stop_note_recording,
             commands::note_recording::cancel_note_recording,
             commands::note_recording::get_note_recording_state,
             commands::note_transcription::transcribe_note_recording,
+            commands::note_transcription::transcribe_note_recording_segment,
         ]))
         .run(tauri::generate_context!())
         .expect("启动会听时发生错误");

@@ -11,6 +11,8 @@ const api = vi.hoisted(() => ({
   createNote: vi.fn(),
   updateNote: vi.fn(),
   deleteNote: vi.fn(),
+  deleteNoteRecording: vi.fn(),
+  listNoteRecordings: vi.fn(),
   moveNote: vi.fn(),
   createNoteFromHistory: vi.fn(),
 }));
@@ -24,6 +26,7 @@ import {
   getNotesSnapshot,
   openNote,
   removeNote,
+  removeNoteRecording,
   resetNotesStoreForTests,
   setActiveFolder,
   toggleFolder,
@@ -83,6 +86,7 @@ beforeEach(() => {
   api.listNoteFolders.mockResolvedValue([folder]);
   api.listNotes.mockResolvedValue(page([listItem(1, "周会记录")]));
   api.getNote.mockResolvedValue(detail(1, "周会记录"));
+  api.listNoteRecordings.mockResolvedValue([]);
   api.updateNote.mockImplementation(async (id: number, patch: { title?: string; content?: string }) => ({
     ...detail(id, patch.title ?? "周会记录"),
   }));
@@ -224,5 +228,37 @@ describe("notesStore", () => {
 
     await expect(createNoteFromHistory(42)).rejects.toThrow("没有转写文本");
     expect(getNotesSnapshot().selectedNoteId).toBeNull();
+  });
+
+  it("loads the recording segments together with the open note", async () => {
+    const segment = {
+      id: 7,
+      noteId: 1,
+      audioFile: "note-1-7.wav",
+      durationSec: 95,
+      transcript: null,
+      historyId: null,
+      sortOrder: 0,
+      createdAt: 1,
+    };
+    api.listNoteRecordings.mockResolvedValue([segment]);
+
+    await openNote(1);
+
+    expect(api.listNoteRecordings).toHaveBeenCalledWith(1);
+    expect(getNotesSnapshot().recordings).toEqual([segment]);
+  });
+
+  it("reloads the note after deleting a recording segment", async () => {
+    await ensureNotesLoaded();
+    await openNote(1);
+    api.deleteNoteRecording.mockResolvedValue(undefined);
+    const before = api.listNoteRecordings.mock.calls.length;
+
+    const removed = await removeNoteRecording(7);
+
+    expect(removed).toBe(true);
+    expect(api.deleteNoteRecording).toHaveBeenCalledWith(7);
+    expect(api.listNoteRecordings.mock.calls.length).toBeGreaterThan(before);
   });
 });

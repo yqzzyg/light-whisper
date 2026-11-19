@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
   transcribeNoteRecording: vi.fn(),
+  transcribeNoteRecordingSegment: vi.fn(),
 }));
 vi.mock("@/api/tauri", () => api);
 
@@ -16,6 +17,7 @@ import {
   getNoteTranscriptionSnapshot,
   resetNoteTranscriptionForTests,
   transcribeNote,
+  transcribeSegment,
 } from "@/hooks/noteTranscriptionStore";
 import type { NoteDetail } from "@/types/notes";
 
@@ -43,6 +45,7 @@ function detail(overrides: Partial<NoteDetail> = {}): NoteDetail {
 beforeEach(() => {
   resetNoteTranscriptionForTests();
   api.transcribeNoteRecording.mockReset();
+  api.transcribeNoteRecordingSegment.mockReset();
   notes.refreshNotes.mockClear();
   notes.reloadOpenNote.mockClear();
 });
@@ -98,6 +101,45 @@ describe("noteTranscriptionStore", () => {
 
     expect(api.transcribeNoteRecording).toHaveBeenCalledTimes(1);
     expect(getNoteTranscriptionSnapshot().noteId).toBe(1);
+  });
+
+  it("tracks the active recording id for a single-segment re-transcribe", async () => {
+    let finish: (value: NoteDetail) => void = () => {};
+    api.transcribeNoteRecordingSegment.mockImplementation(
+      () => new Promise<NoteDetail>((done) => {
+        finish = done;
+      }),
+    );
+
+    const pending = transcribeSegment(3, 42);
+
+    const snapshot = getNoteTranscriptionSnapshot();
+    expect(snapshot.running).toBe(true);
+    expect(snapshot.noteId).toBe(3);
+    expect(snapshot.recordingId).toBe(42);
+    expect(api.transcribeNoteRecordingSegment).toHaveBeenCalledWith(42);
+    // 单段转录只调段命令，不能顺带整篇命令。
+    expect(api.transcribeNoteRecording).not.toHaveBeenCalled();
+
+    finish(detail({ id: 3 }));
+    await expect(pending).resolves.toBeNull();
+    expect(notes.reloadOpenNote).toHaveBeenCalledTimes(1);
+    expect(notes.refreshNotes).toHaveBeenCalledTimes(1);
+    expect(getNoteTranscriptionSnapshot().recordingId).toBeNull();
+  });
+
+  it("keeps the segment failure and clears the active segment", async () => {
+    api.transcribeNoteRecordingSegment.mockRejectedValue("引擎未就绪");
+
+    const error = await transcribeSegment(3, 42);
+
+    expect(error).toBe("引擎未就绪");
+    expect(getNoteTranscriptionSnapshot().error).toEqual({
+      noteId: 3,
+      message: "引擎未就绪",
+    });
+    expect(getNoteTranscriptionSnapshot().recordingId).toBeNull();
+    expect(notes.reloadOpenNote).not.toHaveBeenCalled();
   });
 
   it("estimates a wall-clock time from the recorded duration", () => {

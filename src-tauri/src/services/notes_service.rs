@@ -24,7 +24,7 @@ use tokio::sync::OnceCell;
 use crate::utils::paths;
 
 const NOTES_DB_FILE: &str = "notes.sqlite3";
-const NOTES_SCHEMA_VERSION: i64 = 1;
+const NOTES_SCHEMA_VERSION: i64 = 2;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
 /// 合法的笔记类型，与前端 `NoteKind` 一致。
@@ -80,40 +80,70 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
 
     let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
         .map_err(|error| format!("开始笔记数据库迁移失败: {error}"))?;
-    transaction
-        .execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS note_folders (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                name       TEXT    NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folders_name ON note_folders(name);
-            CREATE TABLE IF NOT EXISTS notes (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                folder_id            INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
-                title                TEXT    NOT NULL DEFAULT '',
-                content              TEXT    NOT NULL DEFAULT '',
-                transcript           TEXT,
-                summary              TEXT,
-                summary_model        TEXT,
-                summary_prompt       TEXT,
-                summary_generated_at INTEGER,
-                summary_source_hash  TEXT,
-                kind                 TEXT    NOT NULL DEFAULT 'personal',
-                duration_sec         REAL,
-                history_id           INTEGER,
-                audio_file           TEXT,
-                created_at           INTEGER NOT NULL,
-                updated_at           INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id, updated_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
-            "#,
-        )
-        .map_err(|error| format!("初始化笔记数据库失败: {error}"))?;
+    if current_version < 1 {
+        transaction
+            .execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS note_folders (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name       TEXT    NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folders_name ON note_folders(name);
+                CREATE TABLE IF NOT EXISTS notes (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    folder_id            INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
+                    title                TEXT    NOT NULL DEFAULT '',
+                    content              TEXT    NOT NULL DEFAULT '',
+                    transcript           TEXT,
+                    summary              TEXT,
+                    summary_model        TEXT,
+                    summary_prompt       TEXT,
+                    summary_generated_at INTEGER,
+                    summary_source_hash  TEXT,
+                    kind                 TEXT    NOT NULL DEFAULT 'personal',
+                    duration_sec         REAL,
+                    history_id           INTEGER,
+                    audio_file           TEXT,
+                    created_at           INTEGER NOT NULL,
+                    updated_at           INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
+                "#,
+            )
+            .map_err(|error| format!("初始化笔记数据库失败: {error}"))?;
+    }
+    if current_version < 2 {
+        // 一条笔记允许多段录音：每段独立存文件、转录与历史引用。
+        // 老数据里 notes.audio_file 是单槽，原样灌成一段；灌完置 NULL，
+        // 之后 notes 不再持有音频引用，避免两个事实源漂移。
+        transaction
+            .execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS note_recordings (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    note_id      INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                    audio_file   TEXT    NOT NULL,
+                    duration_sec REAL,
+                    transcript   TEXT,
+                    history_id   INTEGER,
+                    sort_order   INTEGER NOT NULL DEFAULT 0,
+                    created_at   INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_note_recordings_note
+                    ON note_recordings(note_id, sort_order, id);
+                INSERT INTO note_recordings
+                    (note_id, audio_file, duration_sec, transcript, history_id, sort_order, created_at)
+                SELECT id, audio_file, duration_sec, transcript, history_id, 0, created_at
+                    FROM notes WHERE audio_file IS NOT NULL AND audio_file <> '';
+                UPDATE notes SET audio_file = NULL WHERE audio_file IS NOT NULL;
+                "#,
+            )
+            .map_err(|error| format!("升级笔记数据库到多段录音失败: {error}"))?;
+    }
     transaction
         .pragma_update(None, "user_version", NOTES_SCHEMA_VERSION)
         .map_err(|error| format!("更新笔记数据库版本失败: {error}"))?;
@@ -186,6 +216,20 @@ pub struct NoteDetail {
     pub audio_file: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 笔记里的一段录音。一段 = 一次 start/stop，独立文件、独立转录与历史引用。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteRecording {
+    pub id: i64,
+    pub note_id: i64,
+    pub audio_file: String,
+    pub duration_sec: Option<f64>,
+    pub transcript: Option<String>,
+    pub history_id: Option<i64>,
+    pub sort_order: i64,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -398,11 +442,12 @@ fn reorder_folders_with_connection(connection: &Connection, ids: &[i64]) -> Resu
 
 /// 列表列：摘要优先取正文，正文为空时退回转录；`has_*` 用 SQL 判定，避免把全文拉过来。
 const LIST_ITEM_COLUMNS: &str = "n.id, n.folder_id, n.title, n.kind, \
-     substr(CASE WHEN n.content <> '' THEN n.content ELSE COALESCE(n.transcript, '') END, 1, 140), \
-     n.duration_sec, \
-     (CASE WHEN n.transcript IS NOT NULL AND trim(n.transcript) <> '' THEN 1 ELSE 0 END), \
-     (CASE WHEN n.summary IS NOT NULL AND trim(n.summary) <> '' THEN 1 ELSE 0 END), \
-     n.audio_file, n.created_at, n.updated_at";
+    substr(CASE WHEN n.content <> '' THEN n.content ELSE COALESCE(n.transcript, '') END, 1, 140), \
+    n.duration_sec, \
+    (CASE WHEN n.transcript IS NOT NULL AND trim(n.transcript) <> '' THEN 1 ELSE 0 END), \
+    (CASE WHEN n.summary IS NOT NULL AND trim(n.summary) <> '' THEN 1 ELSE 0 END), \
+    (CASE WHEN EXISTS (SELECT 1 FROM note_recordings r WHERE r.note_id = n.id) THEN 1 ELSE 0 END), \
+    n.created_at, n.updated_at";
 
 const DETAIL_COLUMNS: &str = "n.id, n.folder_id, n.title, n.content, n.transcript, n.summary, \
      n.summary_model, n.summary_generated_at, n.summary_source_hash, n.kind, n.duration_sec, \
@@ -418,7 +463,7 @@ fn list_item_from_row(row: &Row<'_>) -> rusqlite::Result<NoteListItem> {
         duration_sec: row.get(5)?,
         has_transcript: row.get::<_, i64>(6)? != 0,
         has_summary: row.get::<_, i64>(7)? != 0,
-        has_audio: row.get::<_, Option<String>>(8)?.is_some(),
+        has_audio: row.get::<_, i64>(8)? != 0,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
@@ -623,27 +668,43 @@ fn move_note_with_connection(
     get_note_with_connection(connection, id)
 }
 
-/// 删笔记，返回被删笔记引用的音频文件名（外层 `None` = 笔记不存在）。
+/// 删笔记，返回它所有段的音频文件名（外层 `None` = 笔记不存在）。
+///
+/// 段表虽然有 `ON DELETE CASCADE`，运行时连接没开 `PRAGMA foreign_keys`，所以
+/// 这里显式先删段、再删笔记，保证没有孤儿文件引用漏出来。
 fn delete_note_with_connection(
     connection: &Connection,
     id: i64,
-) -> Result<Option<Option<String>>, String> {
-    let audio_file: Option<String> = connection
-        .query_row(
-            "SELECT audio_file FROM notes WHERE id = ?1",
-            params![id],
-            |row| row.get::<_, Option<String>>(0),
-        )
+) -> Result<Option<Vec<String>>, String> {
+    let exists: Option<i64> = connection
+        .query_row("SELECT id FROM notes WHERE id = ?1", params![id], |row| {
+            row.get(0)
+        })
         .optional()
-        .map_err(|error| format!("读取待删除笔记失败: {error}"))?
-        .flatten();
-    let changed = connection
-        .execute("DELETE FROM notes WHERE id = ?1", params![id])
-        .map_err(|error| format!("删除笔记失败: {error}"))?;
-    if changed == 0 {
+        .map_err(|error| format!("读取待删除笔记失败: {error}"))?;
+    if exists.is_none() {
         return Ok(None);
     }
-    Ok(Some(audio_file))
+    let mut statement = connection
+        .prepare("SELECT audio_file FROM note_recordings WHERE note_id = ?1")
+        .map_err(|error| format!("查询笔记录音失败: {error}"))?;
+    let rows = statement
+        .query_map(params![id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("读取笔记录音失败: {error}"))?;
+    let mut files = Vec::new();
+    for row in rows {
+        files.push(row.map_err(|error| format!("解析笔记录音失败: {error}"))?);
+    }
+    connection
+        .execute(
+            "DELETE FROM note_recordings WHERE note_id = ?1",
+            params![id],
+        )
+        .map_err(|error| format!("删除笔记录音引用失败: {error}"))?;
+    connection
+        .execute("DELETE FROM notes WHERE id = ?1", params![id])
+        .map_err(|error| format!("删除笔记失败: {error}"))?;
+    Ok(Some(files))
 }
 
 fn set_transcript_with_connection(
@@ -682,24 +743,199 @@ fn find_note_by_history_with_connection(
         .map_err(|error| format!("读取笔记失败: {error}"))
 }
 
-fn set_audio_with_connection(
+fn recording_from_row(row: &Row<'_>) -> rusqlite::Result<NoteRecording> {
+    Ok(NoteRecording {
+        id: row.get(0)?,
+        note_id: row.get(1)?,
+        audio_file: row.get(2)?,
+        duration_sec: row.get(3)?,
+        transcript: row.get(4)?,
+        history_id: row.get(5)?,
+        sort_order: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+fn list_recordings_with_connection(
     connection: &Connection,
-    id: i64,
-    audio_file: Option<&str>,
-    duration_sec: Option<f64>,
-) -> Result<Option<NoteDetail>, String> {
-    let changed = connection
+    note_id: i64,
+) -> Result<Vec<NoteRecording>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, note_id, audio_file, duration_sec, transcript, history_id, sort_order, created_at \
+             FROM note_recordings WHERE note_id = ?1 ORDER BY sort_order ASC, id ASC",
+        )
+        .map_err(|error| format!("准备查询笔记录音失败: {error}"))?;
+    let rows = statement
+        .query_map(params![note_id], recording_from_row)
+        .map_err(|error| format!("查询笔记录音失败: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("解析笔记录音失败: {error}"))
+}
+
+/// 段转录变化后重算笔记的总时长与聚合转录。
+///
+/// 没有任何段时（`history_id` 转存来的笔记）保持原样：那种笔记的转录来自历史
+/// 记录，音频不在笔记里，不属于段表管辖。
+fn recompute_note_from_recordings_with_connection(
+    connection: &Connection,
+    note_id: i64,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT duration_sec, transcript FROM note_recordings \
+             WHERE note_id = ?1 ORDER BY sort_order ASC, id ASC",
+        )
+        .map_err(|error| format!("准备重算笔记转录失败: {error}"))?;
+    let rows = statement
+        .query_map(params![note_id], |row| {
+            Ok((
+                row.get::<_, Option<f64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .map_err(|error| format!("重算笔记转录失败: {error}"))?;
+    let mut total = 0.0;
+    let mut has_duration = false;
+    let mut texts: Vec<String> = Vec::new();
+    for row in rows {
+        let (duration, transcript) = row.map_err(|error| format!("解析笔记录音失败: {error}"))?;
+        if let Some(seconds) = duration {
+            total += seconds;
+            has_duration = true;
+        }
+        if let Some(text) = transcript {
+            if !text.trim().is_empty() {
+                texts.push(text.trim().to_string());
+            }
+        }
+    }
+    if !has_duration && texts.is_empty() {
+        // 可能是「有段但都还没转写」：总时长仍然要算，只在完全没有段时才跳过。
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM note_recordings WHERE note_id = ?1",
+                params![note_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("统计笔记录音失败: {error}"))?;
+        if count == 0 {
+            return Ok(());
+        }
+    }
+    let joined = if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n\n"))
+    };
+    let duration = if has_duration { Some(total) } else { None };
+    connection
         .execute(
-            "UPDATE notes SET audio_file = ?2, \
-                duration_sec = COALESCE(?3, duration_sec), updated_at = ?4 \
-             WHERE id = ?1",
-            params![id, audio_file, duration_sec, now_millis()],
+            "UPDATE notes SET transcript = ?2, duration_sec = ?3, updated_at = ?4 WHERE id = ?1",
+            params![note_id, joined, duration, now_millis()],
+        )
+        .map_err(|error| format!("保存笔记聚合转录失败: {error}"))?;
+    Ok(())
+}
+
+/// 停止录音后新增一段。不覆盖任何旧段。
+fn add_recording_with_connection(
+    connection: &Connection,
+    note_id: i64,
+    audio_file: &str,
+    duration_sec: Option<f64>,
+) -> Result<Option<NoteRecording>, String> {
+    let exists: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM notes WHERE id = ?1",
+            params![note_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取笔记失败: {error}"))?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    let next_order: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM note_recordings WHERE note_id = ?1",
+            params![note_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("计算录音序号失败: {error}"))?;
+    connection
+        .execute(
+            "INSERT INTO note_recordings \
+                (note_id, audio_file, duration_sec, sort_order, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![note_id, audio_file, duration_sec, next_order, now_millis()],
         )
         .map_err(|error| format!("保存笔记录音失败: {error}"))?;
+    let id = connection.last_insert_rowid();
+    recompute_note_from_recordings_with_connection(connection, note_id)?;
+    Ok(Some(
+        connection
+            .query_row(
+                "SELECT id, note_id, audio_file, duration_sec, transcript, history_id, sort_order, created_at \
+                 FROM note_recordings WHERE id = ?1",
+                params![id],
+                recording_from_row,
+            )
+            .map_err(|error| format!("读取新增笔记录音失败: {error}"))?,
+    ))
+}
+
+fn get_recording_with_connection(
+    connection: &Connection,
+    id: i64,
+) -> Result<Option<NoteRecording>, String> {
+    connection
+        .query_row(
+            "SELECT id, note_id, audio_file, duration_sec, transcript, history_id, sort_order, created_at \
+             FROM note_recordings WHERE id = ?1",
+            params![id],
+            recording_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("读取笔记录音失败: {error}"))
+}
+
+/// 删除一段录音，返回 `(note_id, audio_file)` 交给调用方清文件。
+fn delete_recording_with_connection(
+    connection: &Connection,
+    id: i64,
+) -> Result<Option<(i64, String)>, String> {
+    let Some(recording) = get_recording_with_connection(connection, id)? else {
+        return Ok(None);
+    };
+    connection
+        .execute("DELETE FROM note_recordings WHERE id = ?1", params![id])
+        .map_err(|error| format!("删除笔记录音失败: {error}"))?;
+    recompute_note_from_recordings_with_connection(connection, recording.note_id)?;
+    Ok(Some((recording.note_id, recording.audio_file)))
+}
+
+fn set_recording_transcript_with_connection(
+    connection: &Connection,
+    id: i64,
+    transcript: &str,
+    history_id: Option<i64>,
+) -> Result<Option<NoteRecording>, String> {
+    let changed = connection
+        .execute(
+            "UPDATE note_recordings SET transcript = ?2, \
+                history_id = COALESCE(?3, history_id) WHERE id = ?1",
+            params![id, transcript, history_id],
+        )
+        .map_err(|error| format!("保存分段转录失败: {error}"))?;
     if changed == 0 {
         return Ok(None);
     }
-    get_note_with_connection(connection, id)
+    let Some(recording) = get_recording_with_connection(connection, id)? else {
+        return Ok(None);
+    };
+    recompute_note_from_recordings_with_connection(connection, recording.note_id)?;
+    Ok(Some(recording))
 }
 
 // ---------------------------------------------------------------------------
@@ -796,16 +1032,14 @@ fn audio_file_names_with_connection(
     connection: &Connection,
 ) -> Result<std::collections::HashSet<String>, String> {
     let mut statement = connection
-        .prepare("SELECT audio_file FROM notes WHERE audio_file IS NOT NULL")
+        .prepare("SELECT audio_file FROM note_recordings")
         .map_err(|error| format!("准备查询笔记录音引用失败: {error}"))?;
     let rows = statement
-        .query_map([], |row| row.get::<_, Option<String>>(0))
+        .query_map([], |row| row.get::<_, String>(0))
         .map_err(|error| format!("查询笔记录音引用失败: {error}"))?;
     let mut names = std::collections::HashSet::new();
     for row in rows {
-        if let Some(name) = row.map_err(|error| format!("解析笔记录音引用失败: {error}"))? {
-            names.insert(name);
-        }
+        names.insert(row.map_err(|error| format!("解析笔记录音引用失败: {error}"))?);
     }
     Ok(names)
 }
@@ -846,52 +1080,80 @@ pub async fn move_note(id: i64, folder_id: Option<i64>) -> Result<Option<NoteDet
     .map_err(|error| format!("移动笔记任务失败: {error}"))?
 }
 
-/// 删除笔记，返回被删除笔记引用的音频文件名（没有则 `None`）。
+/// 删除笔记，返回它所有段的音频文件名（外层 `None` = 笔记不存在）。
 ///
 /// 音频文件的实际清理由录音模块负责，这里只把引用交回去。
-pub async fn delete_note(id: i64) -> Result<Option<String>, String> {
+pub async fn delete_note(id: i64) -> Result<Option<Vec<String>>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
         let connection = open_connection()?;
-        Ok(delete_note_with_connection(&connection, id)?.flatten())
+        delete_note_with_connection(&connection, id)
     })
     .await
     .map_err(|error| format!("删除笔记任务失败: {error}"))?
 }
 
-/// 用转录覆盖笔记的转录与时长，并挂上历史记录 ID。
-///
-/// 只由转写流程（`note_transcription`）调用；`history_id` 传 `None` 表示保持原值不变。
-pub async fn set_transcript(
+/// 停止录音后登记一段。每次 start/stop 都是新段，不覆盖旧段。
+pub async fn add_note_recording(
+    note_id: i64,
+    audio_file: &str,
+    duration_sec: Option<f64>,
+) -> Result<Option<NoteRecording>, String> {
+    initialize().await?;
+    let audio_file = audio_file.to_string();
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        add_recording_with_connection(&connection, note_id, &audio_file, duration_sec)
+    })
+    .await
+    .map_err(|error| format!("保存笔记录音任务失败: {error}"))?
+}
+
+pub async fn list_note_recordings(note_id: i64) -> Result<Vec<NoteRecording>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        list_recordings_with_connection(&connection, note_id)
+    })
+    .await
+    .map_err(|error| format!("查询笔记录音任务失败: {error}"))?
+}
+
+pub async fn get_note_recording(id: i64) -> Result<Option<NoteRecording>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        get_recording_with_connection(&connection, id)
+    })
+    .await
+    .map_err(|error| format!("读取笔记录音任务失败: {error}"))?
+}
+
+/// 删除一段，返回 `(note_id, audio_file)` 供调用方清理文件。
+pub async fn delete_note_recording(id: i64) -> Result<Option<(i64, String)>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        delete_recording_with_connection(&connection, id)
+    })
+    .await
+    .map_err(|error| format!("删除笔记录音任务失败: {error}"))?
+}
+
+/// 写一段的转录，并重算笔记聚合转录。
+pub async fn set_note_recording_transcript(
     id: i64,
     transcript: &str,
-    duration_sec: Option<f64>,
     history_id: Option<i64>,
-) -> Result<Option<NoteDetail>, String> {
+) -> Result<Option<NoteRecording>, String> {
     initialize().await?;
     let transcript = transcript.to_string();
     tokio::task::spawn_blocking(move || {
         let connection = open_connection()?;
-        set_transcript_with_connection(&connection, id, &transcript, duration_sec, history_id)
+        set_recording_transcript_with_connection(&connection, id, &transcript, history_id)
     })
     .await
-    .map_err(|error| format!("保存笔记转录任务失败: {error}"))?
-}
-
-/// 记录录音结果（录音模块使用）：只写文件名与时长，不动转录。
-pub async fn set_audio(
-    id: i64,
-    audio_file: Option<&str>,
-    duration_sec: Option<f64>,
-) -> Result<Option<NoteDetail>, String> {
-    initialize().await?;
-    let audio_file = audio_file.map(str::to_string);
-    tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
-        set_audio_with_connection(&connection, id, audio_file.as_deref(), duration_sec)
-    })
-    .await
-    .map_err(|error| format!("保存笔记录音任务失败: {error}"))?
+    .map_err(|error| format!("保存分段转录任务失败: {error}"))?
 }
 
 fn create_note_from_transcript_with_connection(
@@ -1184,13 +1446,18 @@ mod tests {
     }
 
     #[test]
-    fn delete_note_returns_audio_reference_for_the_caller_to_clean() {
+    fn delete_note_returns_all_audio_references_for_the_caller_to_clean() {
         let connection = memory_connection();
         let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
-        set_audio_with_connection(&connection, note.id, Some("1-123.wav"), Some(30.0)).unwrap();
+        add_recording_with_connection(&connection, note.id, "1-123.wav", Some(30.0))
+            .unwrap()
+            .unwrap();
+        add_recording_with_connection(&connection, note.id, "1-456.wav", Some(45.0))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             delete_note_with_connection(&connection, note.id).unwrap(),
-            Some(Some("1-123.wav".to_string()))
+            Some(vec!["1-123.wav".to_string(), "1-456.wav".to_string()])
         );
         assert!(delete_note_with_connection(&connection, note.id)
             .unwrap()
@@ -1212,9 +1479,11 @@ mod tests {
     #[test]
     fn audio_file_names_lists_only_referenced_recordings() {
         let connection = memory_connection();
-        let with_audio = insert_note_with_connection(&connection, None, "有录音", "meeting").unwrap();
-        let without_audio = insert_note_with_connection(&connection, None, "无录音", "personal").unwrap();
-        set_audio_with_connection(&connection, with_audio.id, Some("note-1-2.wav"), Some(12.5))
+        let with_audio =
+            insert_note_with_connection(&connection, None, "有录音", "meeting").unwrap();
+        let without_audio =
+            insert_note_with_connection(&connection, None, "无录音", "personal").unwrap();
+        add_recording_with_connection(&connection, with_audio.id, "note-1-2.wav", Some(12.5))
             .unwrap();
 
         let names = audio_file_names_with_connection(&connection).unwrap();
@@ -1224,23 +1493,94 @@ mod tests {
 
         // 删掉唯一的引用后集合必须为空，否则启动清理不敢删任何文件。
         delete_note_with_connection(&connection, with_audio.id).unwrap();
-        assert!(audio_file_names_with_connection(&connection).unwrap().is_empty());
+        assert!(audio_file_names_with_connection(&connection)
+            .unwrap()
+            .is_empty());
         assert!(get_note_with_connection(&connection, without_audio.id)
             .unwrap()
             .is_some());
     }
 
     #[test]
-    fn set_audio_records_duration_without_touching_transcript() {
+    fn recordings_are_appended_and_recomputed_into_the_note() {
         let connection = memory_connection();
         let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
-        set_transcript_with_connection(&connection, note.id, "已有转录", None, None).unwrap();
-        let updated = set_audio_with_connection(&connection, note.id, Some("a.wav"), Some(61.5))
+        let first = add_recording_with_connection(&connection, note.id, "a.wav", Some(61.5))
             .unwrap()
             .unwrap();
-        assert_eq!(updated.audio_file.as_deref(), Some("a.wav"));
-        assert_eq!(updated.duration_sec, Some(61.5));
-        assert_eq!(updated.transcript.as_deref(), Some("已有转录"));
+        let second = add_recording_with_connection(&connection, note.id, "b.wav", Some(30.0))
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.sort_order, 0);
+        assert_eq!(second.sort_order, 1);
+
+        let recordings = list_recordings_with_connection(&connection, note.id).unwrap();
+        assert_eq!(recordings.len(), 2);
+        assert_eq!(recordings[0].audio_file, "a.wav");
+        assert_eq!(recordings[1].audio_file, "b.wav");
+
+        set_recording_transcript_with_connection(&connection, first.id, "第一段", None).unwrap();
+        set_recording_transcript_with_connection(&connection, second.id, "第二段", Some(42))
+            .unwrap();
+        let updated = get_note_with_connection(&connection, note.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.transcript.as_deref(), Some("第一段\n\n第二段"));
+        assert!((updated.duration_sec.unwrap() - 91.5).abs() < 1e-9);
+        assert!(updated.audio_file.is_none());
+        assert_eq!(
+            list_recordings_with_connection(&connection, note.id).unwrap()[1].history_id,
+            Some(42)
+        );
+
+        // 删一段只删该段引用，另一段与聚合转录都还在。
+        assert_eq!(
+            delete_recording_with_connection(&connection, second.id).unwrap(),
+            Some((note.id, "b.wav".to_string()))
+        );
+        let updated = get_note_with_connection(&connection, note.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.transcript.as_deref(), Some("第一段"));
+        assert!((updated.duration_sec.unwrap() - 61.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn migration_v1_to_v2_moves_the_single_audio_into_a_recording() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, transcript TEXT, \
+                 duration_sec REAL, history_id INTEGER, audio_file TEXT, created_at INTEGER); \
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO notes (id, transcript, duration_sec, history_id, audio_file, created_at) \
+                 VALUES (1, '旧转录', 12.5, 7, 'old.wav', ?1)",
+                params![now_millis()],
+            )
+            .unwrap();
+
+        migrate_schema(&connection).unwrap();
+
+        let recordings = list_recordings_with_connection(&connection, 1).unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(recordings[0].audio_file, "old.wav");
+        assert_eq!(recordings[0].transcript.as_deref(), Some("旧转录"));
+        assert_eq!(recordings[0].history_id, Some(7));
+        let legacy: Option<String> = connection
+            .query_row("SELECT audio_file FROM notes WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(legacy.is_none(), "迁移后 notes 不能再持有音频引用");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -1284,11 +1624,23 @@ mod tests {
     fn note_from_history_is_idempotent_per_history_record() {
         let connection = memory_connection();
         let (first, created) = create_note_from_transcript_with_connection(
-            &connection, None, "周会", "import", "转录", None, 7,
+            &connection,
+            None,
+            "周会",
+            "import",
+            "转录",
+            None,
+            7,
         )
         .unwrap();
         let (second, created_again) = create_note_from_transcript_with_connection(
-            &connection, None, "周会", "import", "转录", None, 7,
+            &connection,
+            None,
+            "周会",
+            "import",
+            "转录",
+            None,
+            7,
         )
         .unwrap();
 
