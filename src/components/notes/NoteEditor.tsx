@@ -25,6 +25,12 @@ import {
   estimateTranscribeSeconds,
   type NoteTranscriptionState,
 } from "@/hooks/noteTranscriptionStore";
+import {
+  cancelSummary,
+  ensureNoteSummarySubscribed,
+  generateSummary,
+  useNoteSummary,
+} from "@/hooks/noteSummaryStore";
 import type {
   NoteDetail,
   NoteFolder,
@@ -134,6 +140,12 @@ export default function NoteEditor({
   const [tab, setTab] = useState<Tab>("content");
   /** 正在播放的段 id 与其 asset URL；同一时刻只展开一个播放器。 */
   const [playing, setPlaying] = useState<{ id: number; url: string } | null>(null);
+  // 摘要进度跟着后端命令走（模块级 store），切走页面再回来仍能看到。
+  const summaryJob = useNoteSummary();
+
+  useEffect(() => {
+    void ensureNoteSummarySubscribed();
+  }, []);
 
   // 换一条笔记时回到正文 tab，并收起播放器：上一条的状态对这条没有意义。
   useEffect(() => {
@@ -209,6 +221,36 @@ export default function NoteEditor({
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(note.updatedAt));
+
+  const summarizingThis = summaryJob.running && summaryJob.noteId === note.id;
+  const summarizingElsewhere = summaryJob.running && summaryJob.noteId !== note.id;
+  const summaryError =
+    !summaryJob.running && summaryJob.error?.noteId === note.id
+      ? summaryJob.error.message
+      : null;
+  // 没有转录就没有素材：后端也会拦，但按钮要先灰掉，别让用户白点一次。
+  const canGenerateSummary = Boolean(transcript.trim()) && !summaryJob.running;
+  const summaryProgressLabel =
+    summaryJob.phase === "part" && summaryJob.total > 1
+      ? t("notes.summaryPart", { part: summaryJob.part, total: summaryJob.total })
+      : summaryJob.phase === "merging" || summaryJob.phase === "streaming"
+        ? t("notes.summaryMerging")
+        : t("notes.summaryPreparing");
+
+  const runSummary = async () => {
+    const message = await generateSummary(note.id);
+    if (message) toast.error(t("notes.summaryFailed", { message }));
+  };
+
+  const copySummary = async () => {
+    try {
+      await copyToClipboard(summary);
+      toast.success(t("notes.copied"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t("notes.copyFailed", { message }));
+    }
+  };
 
   const labels: ExportLabels = {
     transcript: t("notes.transcript"),
@@ -543,7 +585,61 @@ export default function NoteEditor({
 
       {tab === "summary" && (
         <div className="notes-panel">
-          {summary.trim() ? (
+          <div className="notes-toolbar">
+            <span className="notes-toolbar-spacer" />
+            {summary.trim() && !summarizingThis && (
+              <button
+                type="button"
+                className="notes-toolbar-btn"
+                onClick={() => void copySummary()}
+              >
+                <Copy size={12} />
+                {t("notes.copy")}
+              </button>
+            )}
+            {summarizingThis ? (
+              <button
+                type="button"
+                className="notes-toolbar-btn"
+                onClick={() => void cancelSummary()}
+              >
+                <X size={12} />
+                {t("notes.summaryCancel")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="notes-toolbar-btn"
+                disabled={!canGenerateSummary}
+                title={transcript.trim() ? undefined : t("notes.summaryNeedTranscript")}
+                onClick={() => void runSummary()}
+              >
+                <Sparkles size={12} />
+                {summary.trim() ? t("notes.summaryRegenerate") : t("notes.summaryGenerate")}
+              </button>
+            )}
+          </div>
+
+          {note.summaryStale && summary.trim() && !summarizingThis && (
+            <p className="notes-summary-stale">{t("notes.summaryStale")}</p>
+          )}
+          {summarizingElsewhere && (
+            <p className="notes-audio-hint">{t("notes.summaryBusy")}</p>
+          )}
+
+          {summarizingThis ? (
+            <div className="notes-summary-progress" role="status">
+              <p className="notes-transcribe-status">
+                <LoaderCircle size={12} className="animate-spin" />
+                <span>{summaryProgressLabel}</span>
+              </p>
+              {summaryJob.preview && (
+                <div className="notes-summary-preview">
+                  <MarkdownContent content={summaryJob.preview} />
+                </div>
+              )}
+            </div>
+          ) : summary.trim() ? (
             <div className="notes-panel-scroll">
               <MarkdownContent content={summary} />
             </div>
@@ -551,8 +647,16 @@ export default function NoteEditor({
             <div className="notes-panel-empty">
               <Sparkles size={22} strokeWidth={1.5} />
               <p>{t("notes.summaryEmpty")}</p>
-              <p className="notes-panel-hint">{t("notes.summaryHint")}</p>
+              <p className="notes-panel-hint">
+                {transcript.trim() ? t("notes.summaryHint") : t("notes.summaryNeedTranscript")}
+              </p>
             </div>
+          )}
+
+          {summaryError && (
+            <p className="notes-transcribe-error" role="alert">
+              {t("notes.summaryFailed", { message: summaryError })}
+            </p>
           )}
         </div>
       )}

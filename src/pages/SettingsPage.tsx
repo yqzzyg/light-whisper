@@ -69,6 +69,7 @@ import SystemSettingsSections from "@/components/settings/SystemSettingsSections
 import SelectionAssistantSettingsSection from "@/components/settings/SelectionAssistantSettingsSection";
 import AppProfileRulesSettingsSection from "@/components/settings/AppProfileRulesSettingsSection";
 import HistorySettingsSection from "@/components/settings/HistorySettingsSection";
+import NoteSummarySettingsSection from "@/components/settings/NoteSummarySettingsSection";
 import PolishStructureControl from "@/components/settings/PolishStructureControl";
 import ProcessingModeControl from "@/components/settings/ProcessingModeControl";
 import JevSettingsSection from "@/components/settings/JevSettingsSection";
@@ -259,6 +260,7 @@ export default function SettingsPage({
     { id: "microphone", labelKey: "settings.microphone" },
     { id: "input", labelKey: "settings.inputMethod" },
     { id: "ai-polish", labelKey: "settings.aiPolish" },
+    { id: "note-summary", labelKey: "settings.noteSummary" },
     { id: "context", labelKey: "settings.contextAndSearch" },
     { id: "jev", labelKey: "settings.jevNav" },
     { id: "assistant", labelKey: "settings.assistant" },
@@ -3295,6 +3297,11 @@ export default function SettingsPage({
               </p>
             </div>
           </section>
+
+          <NoteSummarySettingsSection
+            profile={profile}
+            onOpenModelSettings={() => handleNavClick("ai-polish")}
+          />
 
           <section className="settings-card" data-nav-id="context"
             style={{ position: "relative", zIndex: picker.isOpen("webSearchProvider") ? 8 : "auto" }}>

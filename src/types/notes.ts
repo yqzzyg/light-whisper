@@ -33,6 +33,8 @@ export interface NoteDetail {
   summaryModel: string | null;
   summaryGeneratedAt: number | null;
   summarySourceHash: string | null;
+  /** 转录或正文在摘要生成后变过；由后端比对指纹得出。 */
+  summaryStale: boolean;
   kind: NoteKind;
   durationSec: number | null;
   historyId: number | null;

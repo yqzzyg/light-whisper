@@ -245,6 +245,18 @@ export interface UserProfile {
   last_correction_validation?: number;
   history_settings?: HistorySettings;
   app_profile_rules?: AppProfileRule[];
+  /** 笔记摘要最终成稿提示词；null/缺失表示用内置默认。 */
+  note_summary_prompt?: string | null;
+  /** 长会议分段提炼提示词，支持 `{index}` / `{total}` 占位符。 */
+  note_summary_part_prompt?: string | null;
+}
+
+/** 内置摘要提示词，由后端提供，前端不另存一份。 */
+export interface NoteSummaryPromptDefaults {
+  merge: string;
+  part: string;
+  /** 自定义提示词的长度上限（字符数），与后端校验同源。 */
+  maxChars: number;
 }
 
 export interface HistorySettings {

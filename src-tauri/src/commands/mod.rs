@@ -15,6 +15,7 @@ pub mod hotkey;
 pub mod jev;
 pub mod model_connection;
 pub mod note_recording;
+pub mod note_summary;
 pub mod note_transcription;
 pub mod notes;
 #[cfg(test)]

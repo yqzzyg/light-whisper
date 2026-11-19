@@ -1,6 +1,6 @@
 # 笔记功能 — 方案调研与工作清单
 
-> 状态：P0/P1/P2 已完成，P3（录音 + 手动转写）已完成，编辑器已换成所见即所得（TipTap）· 最后更新：2026-11-19
+> 状态：P0/P1/P2/P3 已完成，编辑器换成所见即所得（TipTap），P4（AI 摘要）已完成 · 最后更新：2026-11-19
 > 目标：左侧栏新增「笔记」，支持建立笔记目录、在目录下创建笔记；最终能在会议时录音并据此生成笔记。
 > 参考实现：`D:\MyData\Code\CodeWorkSpace\StudyProject\StudyAi\whisper\openwhispr`（桌面端 + 移动端）。
 
@@ -283,6 +283,8 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 | `start_note_recording` / `stop_note_recording` / `cancel_note_recording` / `get_note_recording_state` | 只录音 |
 | `transcribe_note_recording` | 按钮触发：`transcribe_file` + 写历史 + 回填笔记 |
 | `generate_note_summary` / `cancel_note_summary` | AI 摘要 |
+| `get_note_summary_prompt_defaults` | 返回内置摘要提示词与长度上限，供设置页展示与「恢复默认」 |
+| `set_note_summary_prompt` / `set_note_summary_part_prompt` | 保存自定义摘要提示词（传 null 恢复内置默认） |
 | `save_text_file` | 通用「弹保存框 + 落盘」，导出笔记时用；内容由前端按界面语言拼好，后端不解释文本 |
 
 约定：`update_note` 只写传入字段（`Option<Option<T>>` 表达「不改」与「清空」）；`updated_at` 由后端统一刷新；标题留空时列表展示「未命名笔记」由前端兜底。
@@ -449,13 +451,23 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 - 单段转录新增 `transcribe_note_recording_segment(recording_id)`，与整篇共用 `transcribe_one_recording`（校验路径 → 引擎 → 写历史 → 写段转录）。**单段不看幂等**：已转写的段也允许重跑，挑识别不佳的重来；重转新增一条历史（历史是追加日志，不删旧的）。并发仍按 note_id 占位。前端 `noteTranscriptionState` 加 `recordingId`，只在该段显示进度。
 - 已知取舍：多段笔记的 `notes.history_id` 留空（每段各自写历史），所以 P5 的「历史 → 笔记反查跳转」需要按段表的 `history_id` 适配。
 
-### P4 AI 摘要生成（手动触发）
+### P4 AI 摘要生成（已完成 2026-11-19）
 
-- [ ] `note_summary_service.rs`：素材拼装、分块、单块提示、合并提示
-- [ ] 流式事件 + 进度 + 取消
-- [ ] 摘要 tab 渲染、「生成笔记」按钮、重新生成、过期提示
-- [ ] 摘要复制（整篇导出已在 P1 提供）
-- [ ] 可生成条件：转录非空且未在生成中；无 LLM 凭据时按钮禁用并给出口
+- [x] `note_summary_service.rs`：素材拼装（标题 + 手写正文 + 转录）、按段落/句号切块（`MAX_PART_TOKENS = 12_288`，中文 1 字≈1 token、ASCII 4 字符≈1 token）、单块要点提示、合并提示（概要 / 讨论 / 决定 / 待办）
+- [x] 进度事件 + 取消：统一走 `note-summary-status`（preparing / part i-n / merging / streaming / done / failed / cancelled），合并阶段带流式 chunk
+- [x] 摘要 tab：空态「生成结构化笔记」、生成中进度与取消、已有摘要的重新生成 / 复制 / 过期提示
+- [x] 取消判定走错误码：后端返回 `AppError::Cancelled`（`code = "CANCELLED"`），
+  前端按 `code` 识别并静默收尾，不比中文文案；事件名只在 Rust 常量 `note_summary_service::EVENT` 存一份
+- [x] 摘要复制（整篇导出仍在正文栏）
+- [x] 可生成条件：转录非空且没有别的摘要在跑；无凭据时后端返回「去设置里登录或填 Key」的明确提示
+- 实现说明：
+  - 短素材（只有一块）**跳过「先摘要再摘要」**，直接出终稿：省一次往返，也少一层信息损耗。
+  - 流式只在最后一次调用开启；前面每块是非流式提炼，进度靠事件报「第 i/n 段」。
+  - 取消只能**块间生效**：一次 LLM 调用中途无法打断，正在飞的那次返回后才停；不写半截摘要。
+  - 失败与取消都**保留旧摘要**：重新生成失败不该让用户丢掉上一版。
+  - 过期判定放后端：`NoteDetail.summary_stale` 用 FNV-1a 比对「转录 + 正文」指纹，算法只在 `notes_service::source_hash` 一处，前端不重算；摘要服务反过来调它，避免两个 service 互相依赖。
+  - 摘要**不改 `updated_at`**：派生结果不该把笔记顶到「最后编辑」最前；摘要时间记在 `summary_generated_at`。
+  - 并发与转写分开：`note_summary` 与 `note_transcription` 各自占位，转写跑着也能给另一篇生成摘要。
 - 验收：1 小时转录（约 1.5 万字）能分块跑完；中途取消不留下半截脏数据；断网/无凭据有明确报错
 
 ### P5 打磨（可选）

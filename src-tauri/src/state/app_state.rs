@@ -583,6 +583,8 @@ pub struct AppState {
     pub note_capture: NoteCaptureState,
     /// 笔记转写占位。与 `note_capture` 分开：录音结束才有转写，生命周期不重叠。
     pub note_transcription: NoteTranscriptionState,
+    /// 摘要生成占位。与转写分开：两者可以并行，互不阻塞。
+    pub note_summary: NoteSummaryState,
     pub profile: ProfileState,
     pub ui: UiState,
     pub http_client: reqwest::Client,
@@ -638,6 +640,58 @@ impl NoteTranscriptionState {
     }
 }
 
+/// 摘要生成的互斥占位 + 取消位：同一时刻只允许一条笔记在生成。
+///
+/// 与转写分开：转写跑 ASR，摘要跑 LLM，两者可以并行（用户转写完立刻想让另一篇
+/// 生成摘要时不该被拦）。取消只对当前任务有效，任务结束由守卫清位。
+#[derive(Default)]
+pub struct NoteSummaryState {
+    note_id: AtomicI64,
+    cancel: AtomicBool,
+}
+
+/// 摘要占位的作用域守卫：任务结束（含 panic 与提前返回）时自动释放并清取消位。
+pub struct NoteSummaryGuard<'a> {
+    state: &'a NoteSummaryState,
+}
+
+impl Drop for NoteSummaryGuard<'_> {
+    fn drop(&mut self) {
+        self.state.cancel.store(false, Ordering::Release);
+        self.state.note_id.store(0, Ordering::Release);
+    }
+}
+
+impl NoteSummaryState {
+    /// 占用摘要位；已有笔记在生成时返回 `None`。
+    pub fn try_begin(&self, note_id: i64) -> Option<NoteSummaryGuard<'_>> {
+        if note_id <= 0 {
+            return None;
+        }
+        self.note_id
+            .compare_exchange(0, note_id, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        self.cancel.store(false, Ordering::Release);
+        Some(NoteSummaryGuard { state: self })
+    }
+
+    pub fn active_note(&self) -> Option<i64> {
+        match self.note_id.load(Ordering::Acquire) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    /// 请求取消当前生成。没有任务时无副作用。
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+
+    pub fn cancel_flag(&self) -> &AtomicBool {
+        &self.cancel
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -645,6 +699,7 @@ impl Default for AppState {
             recording: Default::default(),
             note_capture: Default::default(),
             note_transcription: Default::default(),
+            note_summary: Default::default(),
             profile: Default::default(),
             ui: Default::default(),
             http_client: reqwest::Client::builder()

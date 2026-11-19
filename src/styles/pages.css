@@ -1383,6 +1383,42 @@
   font-size: var(--text-xs);
 }
 
+/* 提示词输入框底部：字数计量 + 恢复默认。 */
+.settings-prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-inline-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.settings-inline-btn:hover:not(:disabled) {
+  background: var(--color-bg-sunken);
+  color: var(--color-text-primary);
+}
+
+.settings-inline-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.settings-hint[data-error="true"] {
+  color: var(--color-error);
+}
+
 .settings-visually-hidden {
   position: absolute;
   width: 1px;
@@ -3757,6 +3793,36 @@ select:disabled { cursor: not-allowed; opacity: 0.6; }
 .notes-transcribe-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* 摘要过期：用告警色与「音频在历史里」那类灰提示区分开。 */
+.notes-summary-stale {
+  margin: 8px 24px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: var(--text-2xs);
+}
+
+.notes-summary-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 流式预览：边生成边长出来，限高滚动，避免整页布局跟着抖动。 */
+.notes-summary-preview {
+  margin: 0 24px;
+  padding: 10px 14px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  background: var(--color-bg-sunken);
 }
 
 .notes-transcribe-status {

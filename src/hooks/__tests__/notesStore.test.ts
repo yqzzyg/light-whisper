@@ -69,6 +69,7 @@ function detail(id: number, title: string): NoteDetail {
     summaryModel: null,
     summaryGeneratedAt: null,
     summarySourceHash: null,
+    summaryStale: false,
     kind: "personal",
     durationSec: null,
     historyId: null,

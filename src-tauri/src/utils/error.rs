@@ -14,6 +14,10 @@ pub enum AppError {
     Serde(#[from] serde_json::Error),
     #[error("Tauri错误: {0}")]
     Tauri(String),
+    /// 用户主动取消（不是故障）。前端靠 `code == "CANCELLED"` 识别并静默收尾，
+    /// 不要去比对 `message` 里的文案——文案随时可能改。
+    #[error("操作已取消")]
+    Cancelled,
     #[error("{0}")]
     Other(String),
 }
@@ -28,6 +32,7 @@ impl AppError {
             AppError::Io(_) => "IO_ERROR",
             AppError::Serde(_) => "SERDE_ERROR",
             AppError::Tauri(_) => "TAURI_ERROR",
+            AppError::Cancelled => "CANCELLED",
             AppError::Other(_) => "OTHER_ERROR",
         }
     }
@@ -40,6 +45,7 @@ impl AppError {
             AppError::Download(_) => "network",
             AppError::Io(_) | AppError::Serde(_) => "system",
             AppError::Tauri(_) => "tauri",
+            AppError::Cancelled => "cancelled",
             AppError::Other(_) => "other",
         }
     }
@@ -84,7 +90,7 @@ mod tests {
     //! Contract:
     //!   - `AppError::code()` returns a stable string per variant (e.g.
     //!     "ASR_ERROR", "AUDIO_ERROR", "DOWNLOAD_ERROR", "IO_ERROR",
-    //!     "SERDE_ERROR", "TAURI_ERROR", "OTHER_ERROR").
+    //!     "SERDE_ERROR", "TAURI_ERROR", "CANCELLED", "OTHER_ERROR").
     //!   - `AppError::category()` maps each code to a coarse category
     //!     used by the UI to decide how to render the error.
     //!   - The `Serialize` impl emits a structured object with keys
@@ -118,6 +124,15 @@ mod tests {
         let err: AppError = std::io::Error::other("x").into();
         assert_eq!(err.code(), "IO_ERROR");
         assert_eq!(err.category(), "system");
+    }
+
+    #[test]
+    fn app_error_cancelled_has_its_own_code_and_category() {
+        // 前端按 code 识别「用户取消」并静默收尾；归到 other 会跟真失败混在一起。
+        let err = AppError::Cancelled;
+        assert_eq!(err.code(), "CANCELLED");
+        assert_eq!(err.category(), "cancelled");
+        assert_eq!(err.to_string(), "操作已取消");
     }
 
     #[test]

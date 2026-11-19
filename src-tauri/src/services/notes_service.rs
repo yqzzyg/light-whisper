@@ -210,6 +210,8 @@ pub struct NoteDetail {
     pub summary_model: Option<String>,
     pub summary_generated_at: Option<i64>,
     pub summary_source_hash: Option<String>,
+    /// 转录或正文在摘要生成后变过。比对放在后端，指纹算法只在一处实现。
+    pub summary_stale: bool,
     pub kind: String,
     pub duration_sec: Option<f64>,
     pub history_id: Option<i64>,
@@ -469,17 +471,49 @@ fn list_item_from_row(row: &Row<'_>) -> rusqlite::Result<NoteListItem> {
     })
 }
 
+/// 摘要指纹：转录或手写正文任一变化，旧摘要就该被标成「过期」。
+///
+/// 放在这里而不是摘要服务里：比对发生在读笔记时（`detail_from_row`），写库时也
+/// 由本模块落列；`note_summary_service` 反过来调用本函数，依赖保持单向
+/// （业务层 → 存储层），不会两头互指。
+pub fn source_hash(transcript: &str, content: &str) -> String {
+    // FNV-1a：短、稳定、不引依赖。分隔符避免 ("ab","c") 与 ("a","bc") 同值。
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in transcript
+        .as_bytes()
+        .iter()
+        .chain(b"\0".iter())
+        .chain(content.as_bytes())
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn detail_from_row(row: &Row<'_>) -> rusqlite::Result<NoteDetail> {
+    let content: String = row.get(3)?;
+    let transcript: Option<String> = row.get(4)?;
+    let summary: Option<String> = row.get(5)?;
+    let summary_source_hash: Option<String> = row.get(8)?;
+    // 有摘要才谈「过期」：空态是「还没生成」，不是「过期了」。
+    let has_summary = summary
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty());
+    let current_hash = source_hash(transcript.as_deref().unwrap_or(""), &content);
+    let summary_stale =
+        has_summary && summary_source_hash.as_deref() != Some(current_hash.as_str());
     Ok(NoteDetail {
         id: row.get(0)?,
         folder_id: row.get(1)?,
         title: row.get(2)?,
-        content: row.get(3)?,
-        transcript: row.get(4)?,
-        summary: row.get(5)?,
+        content,
+        transcript,
+        summary,
         summary_model: row.get(6)?,
         summary_generated_at: row.get(7)?,
-        summary_source_hash: row.get(8)?,
+        summary_source_hash,
+        summary_stale,
         kind: row.get(9)?,
         duration_sec: row.get(10)?,
         history_id: row.get(11)?,
@@ -640,6 +674,35 @@ fn update_note_with_connection(
     let changed = connection
         .execute(&sql, params_from_iter(values))
         .map_err(|error| format!("保存笔记失败: {error}"))?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    get_note_with_connection(connection, id)
+}
+
+/// 写回 AI 摘要，连同生成用的模型与素材指纹。
+///
+/// 刻意**不动 `updated_at`**：摘要是对已有内容的派生结果，改排序时间会让笔记
+/// 无端跳到列表最前；摘要自己的时间记在 `summary_generated_at`。
+fn set_note_summary_with_connection(
+    connection: &Connection,
+    id: i64,
+    summary: &str,
+    model: &str,
+    source_hash: &str,
+    generated_at: i64,
+) -> Result<Option<NoteDetail>, String> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err("摘要内容为空".into());
+    }
+    let changed = connection
+        .execute(
+            "UPDATE notes SET summary = ?2, summary_model = ?3, summary_generated_at = ?4, \
+             summary_source_hash = ?5 WHERE id = ?1",
+            params![id, summary, model, generated_at, source_hash],
+        )
+        .map_err(|error| format!("保存摘要失败: {error}"))?;
     if changed == 0 {
         return Ok(None);
     }
@@ -1080,6 +1143,33 @@ pub async fn move_note(id: i64, folder_id: Option<i64>) -> Result<Option<NoteDet
     .map_err(|error| format!("移动笔记任务失败: {error}"))?
 }
 
+/// 写回 AI 摘要（异步包装）。生成失败的调用方不应走到这里：旧摘要在失败时保留。
+pub async fn set_note_summary(
+    id: i64,
+    summary: &str,
+    model: &str,
+    source_hash: &str,
+    generated_at: i64,
+) -> Result<Option<NoteDetail>, String> {
+    initialize().await?;
+    let summary = summary.to_string();
+    let model = model.to_string();
+    let source_hash = source_hash.to_string();
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        set_note_summary_with_connection(
+            &connection,
+            id,
+            &summary,
+            &model,
+            &source_hash,
+            generated_at,
+        )
+    })
+    .await
+    .map_err(|error| format!("保存摘要任务失败: {error}"))?
+}
+
 /// 删除笔记，返回它所有段的音频文件名（外层 `None` = 笔记不存在）。
 ///
 /// 音频文件的实际清理由录音模块负责，这里只把引用交回去。
@@ -1239,6 +1329,73 @@ mod tests {
         let folder = insert_folder_with_connection(&connection, " 会议 ").unwrap();
         assert_eq!(folder.name, "会议");
         assert!(insert_folder_with_connection(&connection, "会议").is_err());
+    }
+
+    #[test]
+    fn source_hash_changes_with_either_material_side() {
+        assert_eq!(source_hash("转录", "正文"), source_hash("转录", "正文"));
+        assert_ne!(
+            source_hash("转录", "正文"),
+            source_hash("转录", "改过的正文")
+        );
+        assert_ne!(
+            source_hash("转录", "正文"),
+            source_hash("改过的转录", "正文")
+        );
+    }
+
+    #[test]
+    fn source_hash_is_not_confused_by_field_boundaries() {
+        // ("ab","c") 与 ("a","bc") 拼起来相同，指纹必须不同。
+        assert_ne!(source_hash("ab", "c"), source_hash("a", "bc"));
+    }
+
+    #[test]
+    fn summary_write_records_model_hash_and_keeps_updated_at() {
+        let connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "周会", "meeting").unwrap();
+
+        let hash = source_hash(note.transcript.as_deref().unwrap_or(""), &note.content);
+        let updated =
+            set_note_summary_with_connection(&connection, note.id, "  要点  ", "gpt-4o", &hash, 42)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(updated.summary.as_deref(), Some("要点"));
+        assert_eq!(updated.summary_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(updated.summary_generated_at, Some(42));
+        assert_eq!(updated.summary_source_hash.as_deref(), Some(hash.as_str()));
+        // 摘要是派生结果，不该把笔记顶到「最后编辑」列表最前。
+        assert_eq!(updated.updated_at, note.updated_at);
+
+        // 素材没变 → 不过期；改正文 → 旧摘要立刻标记为过期。
+        assert!(!updated.summary_stale);
+        let edited = update_note_with_connection(
+            &connection,
+            note.id,
+            &NotePatch {
+                title: None,
+                content: Some("改过的正文".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(edited.summary_stale);
+    }
+
+    #[test]
+    fn summary_write_rejects_blank_and_reports_missing_note() {
+        let connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "周会", "meeting").unwrap();
+
+        assert!(
+            set_note_summary_with_connection(&connection, note.id, "   ", "m", "h", 1).is_err()
+        );
+        assert!(
+            set_note_summary_with_connection(&connection, note.id + 999, "要点", "m", "h", 1)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

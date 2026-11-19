@@ -33,6 +33,7 @@ import type {
   NoteQuery,
   NoteRecording,
   NoteRecordingSnapshot,
+  NoteSummaryPromptDefaults,
   PersistentHistoryFilter,
   PersistentHistoryPage,
   PersistentHistoryRecord,
@@ -492,6 +493,19 @@ export function setAssistantSystemPrompt(prompt: string | null): Promise<void> {
   return invokeCommand<void>("set_assistant_system_prompt", { prompt });
 }
 
+/** 笔记摘要的内置提示词（「填入默认 / 恢复默认」用）。 */
+export function getNoteSummaryPromptDefaults(): Promise<NoteSummaryPromptDefaults> {
+  return invokeCommand<NoteSummaryPromptDefaults>("get_note_summary_prompt_defaults");
+}
+
+export function setNoteSummaryPrompt(prompt: string | null): Promise<void> {
+  return invokeCommand<void>("set_note_summary_prompt", { prompt });
+}
+
+export function setNoteSummaryPartPrompt(prompt: string | null): Promise<void> {
+  return invokeCommand<void>("set_note_summary_part_prompt", { prompt });
+}
+
 export function setSelectionAssistantConfig(params: {
   enabled: boolean;
   autoScreenshot: boolean;
@@ -865,4 +879,19 @@ export function getNoteRecordingState(): Promise<NoteRecordingSnapshot> {
  */
 export function transcribeNoteRecording(noteId: number): Promise<NoteDetail> {
   return invokeCommand<NoteDetail>("transcribe_note_recording", { noteId });
+}
+
+/**
+ * 生成（或重新生成）这篇笔记的摘要，返回写库后的笔记。
+ *
+ * 长会议会先分块提炼再合并，进度通过 `note-summary-status` 事件推送；
+ * 失败或取消时旧摘要保持原样。
+ */
+export function generateNoteSummary(noteId: number): Promise<NoteDetail> {
+  return invokeCommand<NoteDetail>("generate_note_summary", { noteId });
+}
+
+/** 请求取消正在跑的摘要生成（只能块间生效，正在飞的那次返回后才停）。 */
+export function cancelNoteSummary(): Promise<void> {
+  return invokeCommand<void>("cancel_note_summary");
 }

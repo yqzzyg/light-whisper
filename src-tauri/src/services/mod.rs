@@ -16,6 +16,7 @@ pub mod llm_client;
 pub mod llm_provider;
 pub mod model_connection;
 pub mod note_recording_service;
+pub mod note_summary_service;
 pub mod notes_service;
 mod oauth_callback;
 pub mod profile_service;

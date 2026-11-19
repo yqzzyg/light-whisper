@@ -66,6 +66,13 @@ const tauriMock = vi.hoisted(() => ({
   setAutostartMinimized: vi.fn(),
   setTranslationHotkey: vi.fn(),
   setTranslationTarget: vi.fn(),
+  setNoteSummaryPrompt: vi.fn(),
+  setNoteSummaryPartPrompt: vi.fn(),
+  getNoteSummaryPromptDefaults: vi.fn().mockResolvedValue({
+    merge: "merge prompt",
+    part: "part prompt",
+    maxChars: 8000,
+  }),
   setWebSearchApiKey: vi.fn(),
   setWebSearchConfig: vi.fn(),
   startMicrophoneLevelMonitor: vi.fn(),

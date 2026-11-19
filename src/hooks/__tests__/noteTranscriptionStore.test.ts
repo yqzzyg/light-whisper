@@ -32,6 +32,7 @@ function detail(overrides: Partial<NoteDetail> = {}): NoteDetail {
     summaryModel: null,
     summaryGeneratedAt: null,
     summarySourceHash: null,
+    summaryStale: false,
     kind: "meeting",
     durationSec: 600,
     historyId: 9,

@@ -403,6 +403,11 @@ pub fn run() {
             commands::note_recording::stop_note_recording,
             commands::note_recording::cancel_note_recording,
             commands::note_recording::get_note_recording_state,
+            commands::note_summary::generate_note_summary,
+            commands::note_summary::cancel_note_summary,
+            commands::note_summary::get_note_summary_prompt_defaults,
+            commands::note_summary::set_note_summary_prompt,
+            commands::note_summary::set_note_summary_part_prompt,
             commands::note_transcription::transcribe_note_recording,
             commands::note_transcription::transcribe_note_recording_segment,
         ]))

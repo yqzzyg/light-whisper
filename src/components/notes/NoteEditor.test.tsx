@@ -15,6 +15,29 @@ vi.mock("@tauri-apps/api/core", () => ({
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
 
+// 摘要状态是模块级 store：这里换成可控桩，既能断言调用，也避免 jsdom 里
+// 真的去订阅 Tauri 事件。
+const summaryStore = vi.hoisted(() => ({
+  state: {
+    noteId: null as number | null,
+    running: false,
+    phase: null as string | null,
+    part: 0,
+    total: 0,
+    preview: "",
+    error: null as { noteId: number; message: string } | null,
+  },
+  generate: vi.fn(),
+  cancel: vi.fn(),
+}));
+
+vi.mock("@/hooks/noteSummaryStore", () => ({
+  useNoteSummary: () => summaryStore.state,
+  ensureNoteSummarySubscribed: () => Promise.resolve(),
+  generateSummary: summaryStore.generate,
+  cancelSummary: summaryStore.cancel,
+}));
+
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     i18n: { language: "zh" },
@@ -64,6 +87,7 @@ function detail(overrides: Partial<NoteDetail> = {}): NoteDetail {
     summaryModel: null,
     summaryGeneratedAt: null,
     summarySourceHash: null,
+    summaryStale: false,
     kind: "meeting",
     durationSec: 600,
     historyId: null,
@@ -118,6 +142,17 @@ function setup(overrides: Partial<React.ComponentProps<typeof NoteEditor>> = {})
 beforeEach(() => {
   api.copyToClipboard.mockReset().mockResolvedValue("");
   api.saveTextFile.mockReset().mockResolvedValue("/tmp/out.md");
+  summaryStore.state = {
+    noteId: null,
+    running: false,
+    phase: null,
+    part: 0,
+    total: 0,
+    preview: "",
+    error: null,
+  };
+  summaryStore.generate.mockReset().mockResolvedValue(null);
+  summaryStore.cancel.mockReset().mockResolvedValue(undefined);
   api.getNoteRecordingAudioUrl.mockReset().mockResolvedValue("C:\\data\\note.wav");
   toast.success.mockReset();
   toast.error.mockReset();
@@ -335,6 +370,58 @@ describe("NoteEditor", () => {
 
     await waitFor(() => expect(api.saveTextFile).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("generates a structured summary from the transcript", async () => {
+    setup();
+    fireEvent.click(screen.getByRole("tab", { name: "notes.summary" }));
+    fireEvent.click(screen.getByText("notes.summaryGenerate"));
+
+    await waitFor(() => expect(summaryStore.generate).toHaveBeenCalledWith(1));
+  });
+
+  it("disables summary generation when the note has no transcript", () => {
+    setup({ note: detail({ transcript: null }) });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.summary" }));
+
+    expect(screen.getByText("notes.summaryNeedTranscript")).toBeTruthy();
+    expect(screen.getByText("notes.summaryGenerate").closest("button")).toBeDisabled();
+  });
+
+  it("shows part progress and lets the user cancel", () => {
+    summaryStore.state = {
+      noteId: 1,
+      running: true,
+      phase: "part",
+      part: 2,
+      total: 3,
+      preview: "",
+      error: null,
+    };
+    setup();
+    fireEvent.click(screen.getByRole("tab", { name: "notes.summary" }));
+
+    expect(screen.getByText("notes.summaryPart")).toBeTruthy();
+    fireEvent.click(screen.getByText("notes.summaryCancel"));
+    expect(summaryStore.cancel).toHaveBeenCalled();
+  });
+
+  it("flags a stale summary and offers regeneration", () => {
+    setup({ note: detail({ summary: "## 概要\n旧摘要", summaryStale: true }) });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.summary" }));
+
+    expect(screen.getByText("notes.summaryStale")).toBeTruthy();
+    expect(screen.getByText("notes.summaryRegenerate")).toBeTruthy();
+    expect(screen.getByText("notes.copy")).toBeTruthy();
+  });
+
+  it("surfaces summary failures through a toast", async () => {
+    summaryStore.generate.mockResolvedValue("没有可用的 AI 凭据");
+    setup();
+    fireEvent.click(screen.getByRole("tab", { name: "notes.summary" }));
+    fireEvent.click(screen.getByText("notes.summaryGenerate"));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("notes.summaryFailed"));
   });
 
   it("surfaces export failures through a toast", async () => {

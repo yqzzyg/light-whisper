@@ -184,6 +184,14 @@ pub struct UserProfile {
     /// 按前台应用匹配的听写覆盖规则；顺序即优先级，首个匹配项生效
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_profile_rules: Vec<AppProfileRule>,
+    /// 笔记 AI 摘要的最终成稿提示词；None = 用内置默认
+    /// （`note_summary_service::DEFAULT_MERGE_PROMPT`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_summary_prompt: Option<String>,
+    /// 长会议分段提炼用的提示词，支持 `{index}` / `{total}` 占位符；
+    /// None = 用内置默认（`note_summary_service::DEFAULT_PART_PROMPT`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_summary_part_prompt: Option<String>,
 }
 
 fn default_history_enabled() -> bool {
