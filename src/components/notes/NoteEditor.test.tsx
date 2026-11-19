@@ -145,7 +145,8 @@ describe("NoteEditor", () => {
     expect(screen.getByText("notes.summaryEmpty")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "notes.myNotes" }));
-    expect(screen.getByPlaceholderText("notes.contentPlaceholder")).toBeTruthy();
+    // 回到正文 tab 时是所见即所得编辑器，正文直接以排版后的形式在里面。
+    expect(document.querySelector(".notes-rt-content")?.textContent).toContain("本周完成三件事");
   });
 
   it("renders the transcript empty state instead of a blank panel", () => {
@@ -266,8 +267,13 @@ describe("NoteEditor", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("toggles markdown preview and mounts the renderer only there", () => {
+  it("switches between rich text, markdown source and preview", () => {
     setup();
+    // 默认是所见即所得，不挂只读渲染器。
+    expect(screen.queryByTestId("markdown")).toBeNull();
+
+    fireEvent.click(screen.getByText("notes.source"));
+    expect(screen.getByDisplayValue(/本周完成三件事/)).toBeInTheDocument();
     expect(screen.queryByTestId("markdown")).toBeNull();
 
     fireEvent.click(screen.getByText("notes.preview"));
@@ -275,6 +281,7 @@ describe("NoteEditor", () => {
 
     fireEvent.click(screen.getByText("notes.edit"));
     expect(screen.queryByTestId("markdown")).toBeNull();
+    expect(screen.queryByDisplayValue(/本周完成三件事/)).toBeNull();
   });
 
   it("copies the transcript and reports success", async () => {
@@ -299,10 +306,31 @@ describe("NoteEditor", () => {
     expect(content).not.toContain("# 周会");
   });
 
+  it("exports the whole note as markdown from the content tab", async () => {
+    // 没有摘要的笔记以前在「摘要」tab 里导不出来，现在正文栏就能导。
+    setup({ note: detail({ summary: null }) });
+    fireEvent.click(screen.getByText("notes.exportMarkdown"));
+
+    await waitFor(() => expect(api.saveTextFile).toHaveBeenCalled());
+    const [fileName, content] = api.saveTextFile.mock.calls[0];
+    expect(fileName).toBe("周会.md");
+    expect(content).toContain("# 周会");
+    expect(content).toContain("本周完成三件事");
+    expect(content).toContain("## notes.transcript");
+    expect(content).toContain("大家好，我们开始。");
+    expect(toast.success).toHaveBeenCalledWith("notes.exported");
+  });
+
+  it("disables markdown export when the note has nothing to write", () => {
+    setup({
+      note: detail({ title: "", content: "", transcript: null, summary: null }),
+    });
+    expect(screen.getByText("notes.exportMarkdown").closest("button")).toBeDisabled();
+  });
+
   it("keeps quiet when the save dialog is cancelled", async () => {
     api.saveTextFile.mockResolvedValue(null);
     setup({ note: detail({ summary: "要点" }) });
-    fireEvent.click(screen.getByRole("tab", { name: "notes.summary" }));
     fireEvent.click(screen.getByText("notes.exportMarkdown"));
 
     await waitFor(() => expect(api.saveTextFile).toHaveBeenCalled());

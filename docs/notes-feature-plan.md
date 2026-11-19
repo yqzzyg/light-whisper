@@ -1,6 +1,6 @@
 # 笔记功能 — 方案调研与工作清单
 
-> 状态：P0/P1/P2 已完成，P3（录音 + 手动转写）已完成，P4 待实现 · 最后更新：2026-11-18
+> 状态：P0/P1/P2 已完成，P3（录音 + 手动转写）已完成，编辑器已换成所见即所得（TipTap）· 最后更新：2026-11-19
 > 目标：左侧栏新增「笔记」，支持建立笔记目录、在目录下创建笔记；最终能在会议时录音并据此生成笔记。
 > 参考实现：`D:\MyData\Code\CodeWorkSpace\StudyProject\StudyAi\whisper\openwhispr`（桌面端 + 移动端）。
 
@@ -12,7 +12,7 @@
 | 目录 | **单层目录**（无嵌套），可增删改名、可排序 | openwhispr 也是单层；嵌套留 `parent_id` 扩展位 |
 | 笔记归属 | 笔记属于某个目录，也可「未归类」 | 目录删除时笔记回到未归类，不级联删除 |
 | 笔记内容 | 三块：AI 摘要 / 我的手写笔记 / 转录原文 | 对应截图的两个 tab + 摘要 tab |
-| 编辑器 | **Markdown 源码 + 预览切换**（`react-markdown` 已依赖） | 不引入 tiptap |
+| 编辑器 | **所见即所得（TipTap / ProseMirror）**，另留 markdown 源码与只读预览两态 | 2026-11-19 推翻原「不引入 tiptap」决策，见 §7 决策 10 |
 | 会议录音 | 在笔记里开始/结束录音，录音结果落到该笔记 | 复用现有采集与 ASR 链路 |
 | 录音方式 | **默认先录后转**：录音期间只采集落盘，不跑流式 ASR | 实时转录要全程跑 ASR，长会议耗电明显；见 §3.5 |
 | 转写时机 | 停止后**只存录音文件**，用户点「转文字」才整段转写（复用上传转录接口） | 手动触发；本地引擎约 19× 实时 |
@@ -296,8 +296,10 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 | `src/main.tsx` | `View` 加 `"notes"`；`navItems` 加「笔记」（`lucide` 的 `NotebookPen`）；slice 分组与懒加载同步 |
 | `src/pages/NotesPage.tsx` | 新建：两栏布局（左侧栏 248px + 右编辑器）；空态、加载态 |
 | `src/components/notes/NotesSidebar.tsx` | 新建：目录树，**笔记直接挂在目录下面**（参考 openwhispr），目录可折叠、悬停出行内操作（新建笔记/重命名/删除/排序），顶部搜索框 |
-| `src/components/notes/NoteEditor.tsx` | 新建：标题输入、元信息行（目录 / 时间 / 保存态）、tab（我的笔记 / 转录 / 摘要）；转录 tab 提供复制与导出 txt，摘要 tab 导出 Markdown |
-| `src/components/notes/MarkdownEditor.tsx` | 新建：编辑 / 预览分段切换（textarea + `MarkdownContent`，预览态才挂载渲染器） |
+| `src/components/notes/NoteEditor.tsx` | 新建：标题输入、元信息行（目录 / 时间 / 保存态）、tab（我的笔记 / 转录 / 摘要）；转录 tab 提供复制与导出 txt，正文栏导出整篇 md |
+| `src/components/notes/MarkdownEditor.tsx` | 新建：三态切换（所见即所得 / markdown 源码 / 只读预览），同一时刻只挂一个编辑器；预览态才挂载 `MarkdownContent` |
+| `src/components/notes/RichTextEditor.tsx` | 新建：TipTap 封装，markdown 进出、受控同步（外部值回声判断 + 选区夹紧）、代码块 lowlight 高亮 |
+| `src/components/notes/NoteEditorToolbar.tsx` | 新建：固定工具栏（撤销重做 / 标题 / 行内格式 / 列表 / 引用 / 代码块 / 表格），用 `useEditorState` 只订阅必要状态 |
 | `src/hooks/notesStore.ts` | 新建：模块级 store（目录树 + 当前笔记 + 保存状态 + 摘要生成状态），切页不丢 |
 | `src/hooks/noteRecordingStore.ts` | 新建：模块级 store（录音中/转写中、已录时长、电平、转写开始时间、临时错误），切页不丢 |
 | `src/hooks/useNoteSummary.ts` | 新建：订阅流式摘要事件，暴露 `isGenerating` / `progress` / `text` |
@@ -373,11 +375,12 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 - [x] `NoteEditor`：标题、元信息行、tab 切换（我的笔记 / 转录 / 摘要；换笔记回到正文 tab）
 - [x] `MarkdownEditor`：编辑 / 预览分段切换，预览态才挂载 `MarkdownContent`；自动保存沿用 P0 的 600ms 防抖 + flush
-- [x] 转录 tab：只读展示、字数、复制、导出 txt；摘要 tab：渲染 Markdown、导出完整笔记
+- [x] 转录 tab：只读展示、字数、复制、导出 txt；正文栏「导出 md」导出整篇（标题 + 正文 + 转录 + 摘要，见 2026-11-19 修正）
 - [x] 空态与加载态（无选中、加载中、无转录、无摘要四种）
 - 验收：输入后 1 秒内落库，强制退出不丢字；长文本不撑爆布局
 - 实现说明：导出文档由**前端**按当前界面语言拼装（标题 + 正文 + 转录 + 摘要），后端 `save_text_file` 只负责弹框与落盘，避免中英文两套界面下后端写死中文小节名；预览复用 `MarkdownContent`，编辑态不付公式预处理的开销
 - 偏移：导出从 P5 提前到这里（转录 txt 与整篇 Markdown 共用同一条命令），P5 只留全局搜索与拖拽等打磨项
+- 修正（2026-11-19）：整篇 md 导出原先只放在「摘要」tab 且要求摘要非空，纯正文笔记导不出来。入口移到正文编辑栏，禁用条件改为「标题/正文/转录/摘要全空」
 
 ### P2 历史/上传 → 笔记（已完成 2026-11-18）
 
@@ -451,14 +454,14 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 - [ ] `note_summary_service.rs`：素材拼装、分块、单块提示、合并提示
 - [ ] 流式事件 + 进度 + 取消
 - [ ] 摘要 tab 渲染、「生成笔记」按钮、重新生成、过期提示
-- [ ] 摘要复制 / 导出 Markdown
+- [ ] 摘要复制（整篇导出已在 P1 提供）
 - [ ] 可生成条件：转录非空且未在生成中；无 LLM 凭据时按钮禁用并给出口
 - 验收：1 小时转录（约 1.5 万字）能分块跑完；中途取消不留下半截脏数据；断网/无凭据有明确报错
 
 ### P5 打磨（可选）
 
 - [ ] 全局搜索（`Ctrl+K`，跨标题/正文/转录）
-- [ ] 笔记导出 Markdown / txt
+- [x] 笔记导出 Markdown / txt（已提前到 P1/P2：正文栏导出 md，转录 tab 导出 txt）
 - [ ] 删除二次确认 + 回收站（若需要）
 - [ ] 目录拖拽排序、笔记拖拽入目录
 - [ ] 超长会议分段转写：>2 小时按 30 分钟切片、逐段转写再拼接（规避引擎整段拼 PCM 的内存增长）
@@ -470,7 +473,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 | 项 | 风险 | 应对 |
 |---|---|---|
-| Markdown 源码编辑 | 用户不习惯写 Markdown 符号 | 预览默认开启切换；提供加粗/列表/标题三个快捷键即可覆盖多数场景 |
+| 富文本编辑器的 markdown 往返 | 渲染后重新序列化会改写原文：表格可能变形、软换行被折成空格、公式退化成纯文本 | 用真实样本做「存→读→存」幂等测试（`RichTextEditor.test.tsx`）；`breaks: true` 保住软换行；单元格回车改成加行，避免表格退化成 `[table]`；已知差异（表格列对齐、任务列表变宽松列表）写进测试注释 |
 | 长转录摘要 | 无 token 计数器，只能按字符估算，可能超出模型窗口 | 用保守预算（12k 字符/块）+ 失败重试降块；错误提示要具体 |
 | 删除语义 | 一期无回收站，误删不可恢复 | 删除前二次确认；若加软删除，成本不高（`deleted_at` + 列表过滤） |
 | 摘要质量 | 本地小模型易丢数字与人名 | 沿用 openwhispr 已验证的提示（强调不得编造、保留专名与数字），并在 UI 标注「AI 生成，需核对」 |
@@ -488,16 +491,40 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 ## 6. 一期明确不做
 
-说话人分离与时间戳、系统声采集、会议中实时上屏（默认先录后转，实时模式放 P5 可选开关）、云端同步与多端、团队空间与权限、分享链接、日历事件关联、会议自动检测、模板市场、富文本编辑器、附件与图片、标签体系、停止录音后自动生成摘要。
+说话人分离与时间戳、系统声采集、会议中实时上屏（默认先录后转，实时模式放 P5 可选开关）、云端同步与多端、团队空间与权限、分享链接、日历事件关联、会议自动检测、模板市场、附件与图片、标签体系、停止录音后自动生成摘要。
 
 ## 7. 已确认决策（2026-11-18）
 
 1. 目录层级：**单层**，不嵌套。
-2. 编辑器：**Markdown 源码 + 预览切换**，不引入 tiptap。
+2. 编辑器：**Markdown 源码 + 预览切换**，不引入 tiptap。_（2026-11-19 推翻，见决策 10）_
 3. 系统声：**一期不做**，只录麦克风；计划里写成已知限制。
 4. 摘要时机：**只手动点「生成笔记」**，不做自动生成。
 5. 录音方式：**默认先录后转**——录音期间只采集落盘、不跑流式 ASR。理由是长会议全程实时推理耗电明显，而摘要基于最终全文、实时结果没有增量价值。
 6. 转写时机：**停止录音只保存文件，用户点「转文字」才转写**。好处是录坏/录空的不浪费算力、失败重试就是再点一次、不用引入「待转写」中间态。
+
+### 7.1 编辑器选型（2026-11-19）
+
+原决策「Markdown 源码 + 预览切换」的真实代价是：编辑时看不到任何排版、格式只能手打、来回切 tab 丢滚动位置。改为**所见即所得**，并把另外两态保留为退路（源码态改原文、预览态看最终效果）。
+
+10. 内核选 **TipTap 3 + `tiptap-markdown`**，不用 Milkdown Crepe。实测对比（最小页面 / vite build gzip）：
+
+    | | Crepe 全量 | TipTap 全家桶 | Milkdown core 自拼 |
+    |:--|:--|:--|:--|
+    | 产物 gzip | 1,011 KB | 265 KB | 209 KB |
+    | 传递依赖 | 216 包 / 70 MB | 77 包 / 28 MB | 168 包 |
+    | Vue 运行时 | 10 个包 | 0 | 0 |
+    | CodeMirror 6 | 33 包 + ~100 语言 chunk | 0 | 0 |
+    | 自带 UI | 全套 | 无 | 无 |
+
+    Crepe 的 UI（工具栏、slash 菜单、表格操作）是用 Vue 的 `defineComponent` + `h()` 写的，React 项目会连带吃下 Vue 运行时；且它把 `total_dist_bytes` 推到 4 MB 量级，等于废掉体积预算。而「不吃 Vue 的 Milkdown」不带任何 UI，工作量与 TipTap 相同、生态与文档还不如 TipTap，因此没有选它的理由。
+
+11. 编辑态排版**复用 `.markdown-content`**：`src/styles/markdown.css` 的选择器都是 `.markdown-content h1/p/ul/pre/table` 这类元素选择器，ProseMirror 产出的 DOM 同构，套上同一个 class 即可做到「编辑时看到的 = 预览时看到的」，不维护第二套排版。
+
+12. **存储口径不变**：`notes.content` 仍是 markdown 原文，导出、搜索、摘要、列表摘要全部照旧。编辑器内部是 ProseMirror 文档，进出都是字符串。
+
+13. 已知差异（短期接受，写进测试注释）：表格列对齐（`:--`）在序列化时丢失；任务列表项之间会被插入空行（变成宽松列表，渲染结果一致）；`$$…$$` 公式在编辑期是纯文本（预览态仍正常渲染，需接 `@tiptap/extension-mathematics` 才有编辑期公式）。
+
+14. 单元格里按回车 = **在下方加一行**，不是拆段落。原因是 `tiptap-markdown` 的表格序列化遇到多段落单元格会直接输出 `[table]`，整张表内容消失；管道表本身也只能是一行一单元格。
 7. 转写复用的粒度：**不做全量收口**。现存三处分派是三种执行策略（听写兜底 / 上传页 interim 预览 / 历史重新识别），合成一个带回调的万能函数，省下的只是每处 6 行 `match`，却把两条主流程的回归面绑在一起。只加一个窄接口 `transcription_service::transcribe_file(path, duration)`：本地引擎经新增的 `funasr_service::transcribe_path` **直接下发文件路径**（Python 端 `ServerCommand::Transcribe` 已支持 `audio_path`，不读字节、不写临时文件），在线引擎走 `check_engine_limit` + 既有在线 service。
 8. 音频归属：录音写进**独立目录 `notes_audio/`**，`notes.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（`history_service.rs:297-303` 先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
 9. 多段语义（2026-11-19 修订第 8 条）：一条笔记的多次录音**全部保留**，由 `note_recordings` 子表持有；`notes.audio_file` 单槽在迁移后置空、不再写入。选子表而非把多段塞进 JSON：要按段查未转写、按段删、给启动 GC 提供引用集合。转录是段级幂等 + 拼接，不做整段合并转写（那要在磁盘临时拼 WAV，违背零复制，且失败无法单段重试）。

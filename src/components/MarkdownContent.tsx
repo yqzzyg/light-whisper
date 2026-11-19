@@ -4,7 +4,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
-import "@/styles/markdown.css";
+// 排版样式在 main.tsx 里随入口加载（编辑器也要用），这里只留 katex 的字体与公式样式。
 
 interface MarkdownContentProps {
   content: string;

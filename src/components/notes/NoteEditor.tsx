@@ -179,6 +179,11 @@ export default function NoteEditor({
 
   const transcript = note.transcript ?? "";
   const summary = note.summary ?? "";
+  // 导出的是一条笔记的全量（标题 + 正文 + 转录 + 摘要），所以只要有任意一块
+  // 有字就允许导出；以前只在「摘要」tab 提供入口，没写摘要的笔记就导不出来。
+  const hasExportableContent = Boolean(
+    note.title.trim() || note.content.trim() || transcript.trim() || summary.trim(),
+  );
   // 转写状态是全局的（一次只跑一篇）：只有当前笔记在跑时才显示进度，
   // 失败提示也只挂回出错那篇，切到别的笔记不会看到无关的报错。
   const isTranscribing = transcription.running && transcription.noteId === note.id;
@@ -342,10 +347,15 @@ export default function NoteEditor({
 
       {tab === "content" && (
         <MarkdownEditor
+          // 换笔记直接重建编辑器：否则撤销栈会跨笔记生效，Ctrl+Z 能把上一篇的
+          // 内容盖回来，而自动保存会把它写进这一篇。
+          key={note.id}
           value={note.content}
           placeholder={t("notes.contentPlaceholder")}
           onChange={(content) => onEdit({ content })}
           onBlur={onFlush}
+          onExport={() => void exportNote("markdown")}
+          exportDisabled={!hasExportableContent}
         />
       )}
 
@@ -533,18 +543,6 @@ export default function NoteEditor({
 
       {tab === "summary" && (
         <div className="notes-panel">
-          <div className="notes-toolbar">
-            <span className="notes-toolbar-spacer" />
-            <button
-              type="button"
-              className="notes-toolbar-btn"
-              disabled={!summary.trim()}
-              onClick={() => void exportNote("markdown")}
-            >
-              <Download size={12} />
-              {t("notes.exportMarkdown")}
-            </button>
-          </div>
           {summary.trim() ? (
             <div className="notes-panel-scroll">
               <MarkdownContent content={summary} />

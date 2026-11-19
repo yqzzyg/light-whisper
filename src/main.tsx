@@ -13,6 +13,9 @@ import i18n from "./i18n";
 import { useTranslation } from "react-i18next";
 import "./styles/theme.css";
 import "./styles/pages.css";
+// 正文排版必须常驻：笔记编辑器（ProseMirror）也套着 .markdown-content，
+// 而 MarkdownContent 的渲染器是懒加载的，样式不能跟着它一起延迟。
+import "./styles/markdown.css";
 
 type View = "main" | "settings" | "history" | "upload" | "notes";
 const loadSettingsPage = () => import("./pages/SettingsPage");

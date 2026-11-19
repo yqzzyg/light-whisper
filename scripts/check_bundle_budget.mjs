@@ -25,12 +25,16 @@ for (const file of jsFiles) {
   if (name.startsWith("SubtitleOverlay-")) metrics.subtitle_gzip_bytes = gzipBytes;
   if (name.startsWith("SelectionOverlay-")) metrics.selection_gzip_bytes = gzipBytes;
   if (name.startsWith("MarkdownContent-")) metrics.markdown_gzip_bytes = gzipBytes;
+  if (name.startsWith("NotesPage-")) metrics.notes_gzip_bytes = gzipBytes;
 }
 metrics.total_js_gzip_bytes = totalGzipBytes;
-// Rich text is shared by the overlays and loaded only when needed.
+// Rich text is shared by the overlays and loaded only when needed. The notes page is
+// lazy-loaded and carries the whole editor (ProseMirror + syntax highlighting), so it
+// gets its own budget instead of inflating the startup figure.
 metrics.core_js_gzip_bytes = totalGzipBytes
   - (metrics.selection_gzip_bytes ?? 0)
-  - (metrics.markdown_gzip_bytes ?? 0);
+  - (metrics.markdown_gzip_bytes ?? 0)
+  - (metrics.notes_gzip_bytes ?? 0);
 const distFiles = listFiles(distDir);
 const fontFiles = distFiles.filter(({ path }) => /\.(?:woff2?|ttf|otf|ttc)$/i.test(path));
 metrics.largest_font_bytes = Math.max(0, ...fontFiles.map(({ bytes }) => bytes));
@@ -59,12 +63,16 @@ const budgets = {
     rationale: "shared Markdown and math renderer",
   },
   core_js_gzip_bytes: {
-    limit: 190_000,
-    rationale: "all JavaScript except the selection overlay and lazy rich text",
+    limit: 210_000,
+    rationale: "startup and resident pages, excluding the lazily loaded overlay/markdown/notes chunks",
+  },
+  notes_gzip_bytes: {
+    limit: 300_000,
+    rationale: "lazy notes page, including the rich text editor",
   },
   total_js_gzip_bytes: {
-    limit: 340_000,
-    rationale: "complete JavaScript payload",
+    limit: 620_000,
+    rationale: "complete JavaScript payload (lazy chunks are never all loaded at once)",
   },
   largest_font_bytes: {
     limit: 80_000,
@@ -75,7 +83,7 @@ const budgets = {
     rationale: "complete font payload",
   },
   total_dist_bytes: {
-    limit: 2_500_000,
+    limit: 3_400_000,
     rationale: "complete frontend distribution",
   },
 };
