@@ -147,12 +147,12 @@ fn safe_audio_path(file_name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 fn configure_connection(connection: &Connection) -> Result<(), String> {
     db::configure(connection)?;
-    migrate_schema(connection)
+    ensure_schema(connection)
 }
 
 /// 建表。`notes_service` 建 `notes` 表前要先调它：
 /// 笔记侧的 `history_id` 外键指向 `transcription_history`，父表必须先在。
-pub(crate) fn migrate_schema(connection: &Connection) -> Result<(), String> {
+pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
     db::ensure_schema(connection, |transaction| {
         transaction
             .execute_batch(
@@ -205,7 +205,7 @@ pub async fn initialize() -> Result<(), String> {
         .get_or_try_init(|| async {
             tokio::task::spawn_blocking(|| {
                 let connection = db::open()?;
-                migrate_schema(&connection)?;
+                ensure_schema(&connection)?;
                 // 初始化完成前所有历史操作都会等待此 OnceCell，因此这里清理的
                 // 只能是上次进程崩溃遗留的租约和孤立音频。
                 connection

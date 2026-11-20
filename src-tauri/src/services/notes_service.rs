@@ -1,8 +1,8 @@
 //! 笔记与笔记目录的持久化。
 //!
-//! 与历史模块同在 `db` 的数据库文件里，但表各自独立。同库是为了拿到跨模块的事务
+//! 与历史模块同在 `db` 的数据库文件里，表分属各自模块。同库是为了拿到跨模块的事务
 //! 与外键：一次笔记转写要同时写历史行和笔记 transcript，「历史 → 存为笔记」要读
-//! 一侧写另一侧，分开存时这两处既不能回滚也不能约束引用。
+//! 一侧写另一侧，这两处必须能一起回滚、能约束引用。
 //!
 //! `notes.history_id` 与 `note_recordings.history_id` 都指向 `transcription_history(id)`，
 //! `ON DELETE SET NULL`：历史被保留期淘汰时只断开引用，笔记本身不受影响。
@@ -41,10 +41,10 @@ fn now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn migrate_schema(connection: &Connection) -> Result<(), String> {
+fn ensure_schema(connection: &Connection) -> Result<(), String> {
     // `notes` 与 `note_recordings` 的 `history_id` 是指向 `transcription_history` 的外键，
     // SQLite 建表时会校验父表存在，所以历史模块必须先建。两步各自开事务，不能嵌套。
-    history_service::migrate_schema(connection)?;
+    history_service::ensure_schema(connection)?;
     db::ensure_schema(connection, |transaction| {
         transaction
             .execute_batch(
@@ -100,14 +100,14 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
 
 /// 幂等初始化。所有对外函数都先调它，与历史模块保持同一范式。
 ///
-/// 只跑 `migrate_schema`（含历史侧的建表），**不**跑 `history_service::initialize`：
+/// 只跑 `ensure_schema`（含历史侧的建表），**不**跑 `history_service::initialize`：
 /// 后者还会清租约与孤儿历史音频，那是历史模块自己的启动清理，由 `lib.rs` 单独触发。
 pub async fn initialize() -> Result<(), String> {
     NOTES_INITIALIZED
         .get_or_try_init(|| async {
             tokio::task::spawn_blocking(|| {
                 let connection = db::open()?;
-                migrate_schema(&connection)
+                ensure_schema(&connection)
             })
             .await
             .map_err(|error| format!("初始化笔记数据库任务失败: {error}"))?
@@ -787,7 +787,7 @@ fn find_note_id_by_history_with_connection(
 
 /// 批量版反查：历史列表一次带上整页 id，返回「历史行 → 笔记」的映射。
 ///
-/// 逐条反查会让每张卡片发一次 IPC、开一次库，一页 50 条就是 50 次往返；这里一次
+/// 逐条反查会让每张卡片发一次 IPC、开一次连接，一页 50 条就是 50 次往返；这里一次
 /// 查完。判定顺序与单条版一致：先看 `notes.history_id`（存为笔记），再看
 /// `note_recordings.history_id`（会议录音的段）。
 fn find_note_ids_by_history_with_connection(
@@ -1472,7 +1472,7 @@ mod tests {
 
     fn memory_connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
-        migrate_schema(&connection).unwrap();
+        ensure_schema(&connection).unwrap();
         seed_history(&connection, &[7, 42, 99]);
         connection
     }
@@ -1955,8 +1955,8 @@ mod tests {
     #[test]
     fn schema_creation_yields_the_final_shape_without_legacy_columns() {
         let connection = Connection::open_in_memory().unwrap();
-        migrate_schema(&connection).unwrap();
-        migrate_schema(&connection).expect("建表重复执行是幂等的");
+        ensure_schema(&connection).unwrap();
+        ensure_schema(&connection).expect("建表重复执行是幂等的");
 
         let columns: Vec<String> = connection
             .prepare("PRAGMA table_info('notes')")
@@ -1995,7 +1995,7 @@ mod tests {
     fn deleting_history_row_only_clears_the_note_reference() {
         let connection = Connection::open_in_memory().unwrap();
         db::configure(&connection).unwrap();
-        migrate_schema(&connection).unwrap();
+        ensure_schema(&connection).unwrap();
         connection
             .execute(
                 "INSERT INTO transcription_history \

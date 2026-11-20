@@ -1,12 +1,13 @@
 //! 应用唯一的 SQLite 数据库文件。
 //!
 //! 历史与笔记同在这个文件里，因为跨模块写必须原子：一次笔记转写要同时写历史行
-//! 和笔记 transcript；「历史存为笔记」要读一侧写另一侧。分开存这两处就没有事务
-//! 也没有外键，只能靠调用方手工兜底，删笔记后历史行会变成悬空指针。
+//! 和笔记 transcript；「历史存为笔记」要读一侧写另一侧。这两处必须能一起回滚、
+//! 能约束引用，否则只能靠调用方手工兜底，删笔记后历史行会变成悬空指针。
 //!
 //! 表名按模块划分：`transcription_history` / `history_audio_leases` 归历史，
 //! `notes` / `note_recordings` / `note_folders` 归笔记。代码边界由
-//! `history_service` / `notes_service` 承担，互不直接调用对方 SQL。
+//! `history_service` / `notes_service` 承担，依赖是单向的：笔记侧调历史侧的
+//! `*_with_connection` 读写真实数据，历史侧不碰笔记的表。
 //!
 //! 跨模块约束是 `notes.history_id`、`note_recordings.history_id` 指向
 //! `transcription_history(id)`，`ON DELETE SET NULL`：历史被保留期淘汰时只断开引用，

@@ -85,12 +85,12 @@ created_at, updated_at
 | 能力 | 位置 | 复用方式 |
 |---|---|---|
 | SQLite 建表范式 | `src/db.rs`（WAL + `ensure_schema` 事务 + 每次开连接） | 笔记模块复用同一个文件与连接工厂，只建自己的表（见 §3.2） |
-| 录音链路 | `commands/audio.rs:500 start_recording` / `:514 stop_recording`，`RecordingContext` 常驻根部 | **不能直接复用**：见下方「耦合点」 |
+| 录音链路 | `commands/audio.rs` 的 `start_recording` / `stop_recording`，`RecordingContext` 常驻根部 | **不能直接复用**：见下方「耦合点」 |
 | 流式转写 | `transcription-result` 事件（`interim` 标记 + `sessionId`） | 仅作为可选的实时模式，一期不用 |
 | 采集原语 | `audio_service::spawn_audio_capture_thread(stop_flag, samples, device)`（返回设备采样率） | **笔记录音直接用它**：只采集、不转写 |
 | 重采样 | `audio_service::resample::ResamplerState`（`push_i16` 增量重采样到 16k） | 录音时按块重采样后再落盘，文件直接可用 |
-| 整段转写 | `funasr_service::transcribe`（WAV bytes → 临时文件 → IPC，已带长音频自适应超时）；`commands/audio_import.rs:183 transcribe_imported_audio`（解码 → 块式流式 → 存历史） | 新增窄接口「文件 → 文本」`transcription_service::transcribe_file`，直接传路径复用已有预算，见 §3.3 |
-| 历史与音频 | `transcription_history` 表 + `history_audio/*.wav` + 启动时清孤儿（`history_service.rs:810`）+ 租约（启动清空） | 笔记音频**独立放 `notes_audio/`**，历史行 `audio_file` 留空、只做文本记录；不复用历史 GC |
+| 整段转写 | `funasr_service::transcribe`（WAV bytes → 临时文件 → IPC，已带长音频自适应超时）；`commands/audio_import.rs` 的 `transcribe_imported_audio`（解码 → 块式流式 → 存历史） | 新增窄接口「文件 → 文本」`transcription_service::transcribe_file`，直接传路径复用已有预算，见 §3.3 |
+| 历史与音频 | `transcription_history` 表 + `history_audio/*.wav` + 启动时清孤儿（`history_service::cleanup_orphan_audio_files_with_connection`）+ 租约（启动清空） | 笔记音频**独立放 `notes_audio/`**，历史行 `audio_file` 留空、只做文本记录；不复用历史 GC |
 | LLM 调用 | `services/llm_client/*`（OpenAI / Anthropic / 兼容端点 SSE）、`assistant_service::generate_content` | 摘要生成走同一套 provider 配置与凭据 |
 | Markdown 渲染 | `react-markdown` + `remark-gfm` + `katex`（已依赖） | 摘要与笔记预览直接渲染 |
 | 模块级 store 范式 | `hooks/audioImportStore.ts`（`useSyncExternalStore`） | 笔记页状态与「生成中」状态放模块级，切页不丢 |
@@ -99,12 +99,12 @@ created_at, updated_at
 **录音链路的耦合点**（决定笔记录音不能直接调 `start_recording`）：
 
 - `start_recording_with_start_owner` 在采集启动后**必定**二选一 spawn `spawn_native_recording`（流式 ASR）或 `spawn_interim_loop`，没有「只采集」分支。
-- 收尾由 `finalize_recording` 负责，里面绑定了字幕窗口、浮层结果、润色、粘贴、`transcription_history` 写入等一整套听写语义；`finalize.rs:288` 的注释明确写了「原生结果不退化为整段 ASR」。
+- 收尾由 `finalize_recording` 负责，里面绑定了字幕窗口、浮层结果、润色、粘贴、`transcription_history` 写入等一整套听写语义；`services/audio_service/finalize.rs` 的注释明确写了「原生结果不退化为整段 ASR」。
 - 因此笔记录音**另起一条采集会话**（不与听写状态机共用 `RecordingSlot`），停止后走「落盘 WAV → 存历史 → 整段转写」，与听写链路零交叉，回归面最小。
 
 **前端缺口**：没有富文本编辑器（无 tiptap / prosemirror / slate），只有 `react-markdown`。
 
-**能力缺口**：录音只走 `cpal` 默认输入设备（`audio_service/capture.rs:209`），**没有系统声环回**（`wasapi` 已在 `Cargo.toml:91`，但未使用）。线上会议只能录到本机麦克风。
+**能力缺口**：录音只走 `cpal` 默认输入设备（`services/audio_service/capture.rs`），**没有系统声环回**（`wasapi` 依赖已在 `Cargo.toml` 里声明，但未使用）。线上会议只能录到本机麦克风。
 
 ### 3.2 数据模型（`minutes.sqlite3`）
 
@@ -168,7 +168,7 @@ CREATE INDEX idx_note_recordings_note ON note_recordings(note_id, sort_order, id
 - `transcript` 存**纯文本 + 空行分段**，不存 JSON segments —— 本项目 ASR 不返回时间戳与说话人，JSON 结构没有信息量。
 - 去掉 `participants` / `enhanced_at_content_hash`（改名 `summary_source_hash`）/ `note_type`（改名 `kind`，语义更窄）。
 - 去掉 `space_id`、`cloud_*`、`share_*`、`deleted_at`（一期不做回收站，删除即删，见 §6 风险）。
-- 音频不落 `history_audio/`：那里在 `initialize()` 时会做孤儿清理（`history_service.rs:297-303` 先 `DELETE FROM history_audio_leases`，再 `cleanup_orphan_audio_files_with_connection`），未被历史行引用又无租约的文件会被直接删掉——「录完还没点转文字就重启」会丢录音。笔记音频因此独立放 `notes_audio/`，回收责任归笔记自己，见 §3.3。
+- 音频不落 `history_audio/`：那里在 `initialize()` 时会做孤儿清理（先 `DELETE FROM history_audio_leases`，再 `cleanup_orphan_audio_files_with_connection`），未被历史行引用又无租约的文件会被直接删掉——「录完还没点转文字就重启」会丢录音。笔记音频因此独立放 `notes_audio/`，回收责任归笔记自己，见 §3.3。
 
 ### 3.3 后端改动清单
 
@@ -200,9 +200,9 @@ set_note_recording_transcript(recording_id, text, history_id)   -- 段级；P3 �
 
 | 位置 | 策略 | 为什么存在 |
 |---|---|---|
-| `finalize.rs:968 do_final_asr` | 重采样 → 在线/本地一次性 | 听写收尾兜底 |
-| `audio_import.rs:89 transcribe_import_streaming` | 1 秒块流式喂 | 上传页要 interim 实时预览（产品特性） |
-| `history.rs:162 transcribe_wav_bytes_dispatched` | WAV bytes → 分派 | 历史「重新识别」 |
+| `services/audio_service/finalize.rs` 的 `do_final_asr` | 重采样 → 在线/本地一次性 | 听写收尾兜底 |
+| `commands/audio_import.rs` 的 `transcribe_import_streaming` | 1 秒块流式喂 | 上传页要 interim 实时预览（产品特性） |
+| `commands/history.rs` 的转写分派 | WAV bytes → 分派 | 历史「重新识别」 |
 
 把它们合成一个带 `progress` / `on_interim` 回调的万能函数，省下的只是每处 6 行 `match`，代价是把听写、上传两条主流程的回归面绑在一起，读起来还要先理解一堆可选参数——**不划算，不做**。
 
@@ -372,7 +372,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 **已知限制**：
 
-- 录音只有麦克风（`audio_service/capture.rs:209` 用 `cpal` 默认输入设备），没有系统声环回。线下会议、或线上会议外放音箱时可用；戴耳机开线上会议只能录到自己。`wasapi` 依赖（`Cargo.toml:91`）已在，后续加第二路输入 + 混音即可，不阻塞本方案。
+- 录音只有麦克风（`services/audio_service/capture.rs` 用 `cpal` 默认输入设备），没有系统声环回。线下会议、或线上会议外放音箱时可用；戴耳机开线上会议只能录到自己。`wasapi` 依赖已在 `Cargo.toml` 里声明，后续加第二路输入 + 混音即可，不阻塞本方案。
 - 整段转写仍受引擎侧约束：本地引擎在 `finish` 时要把全部 PCM 拼起来，内存随音频线性增长（1 小时约 230MB）。因此**超过 2 小时的录音由 `audio_chunk_service` 自动按 30 分钟切片**，逐块转写再拼接，内存峰值恒定在单块（约 115MB），见 §4 P5。
 - 在线引擎（GLM 30 秒 / DashScope ≈3.9 分钟）显然不适合会议录音，笔记页在检测到在线引擎时给一条「会议录音建议切换本地引擎」的提示，不阻塞。
 
@@ -583,5 +583,5 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 14. 单元格里按回车 = **在下方加一行**，不是拆段落。原因是 `tiptap-markdown` 的表格序列化遇到多段落单元格会直接输出 `[table]`，整张表内容消失；管道表本身也只能是一行一单元格。
 7. 转写复用的粒度：**不做全量收口**。现存三处分派是三种执行策略（听写兜底 / 上传页 interim 预览 / 历史重新识别），合成一个带回调的万能函数，省下的只是每处 6 行 `match`，却把两条主流程的回归面绑在一起。只加一个窄接口 `transcription_service::transcribe_file(path, duration)`：本地引擎经新增的 `funasr_service::transcribe_path` **直接下发文件路径**（Python 端 `ServerCommand::Transcribe` 已支持 `audio_path`，不读字节、不写临时文件），在线引擎走 `check_engine_limit` + 既有在线 service。
-8. 音频归属：录音写进**独立目录 `notes_audio/`**，`note_recordings.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（`history_service.rs:297-303` 先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
+8. 音频归属：录音写进**独立目录 `notes_audio/`**，`note_recordings.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
 9. 多段语义（2026-11-19 修订第 8 条）：一条笔记的多次录音**全部保留**，由 `note_recordings` 子表持有；`notes` 表不再持有音频引用。选子表而非把多段塞进 JSON：要按段查未转写、按段删、给启动 GC 提供引用集合。转录是段级幂等 + 拼接，不做整段合并转写（那要在磁盘临时拼 WAV，违背零复制，且失败无法单段重试）。
