@@ -377,10 +377,28 @@ pub async fn insert(draft: HistoryDraft, retention_days: u32) -> Result<i64, Str
     initialize().await?;
     tokio::task::spawn_blocking(move || {
         let mut connection = db::open()?;
-        let now = now_millis();
-        connection
-            .execute(
-                r#"
+        let id = insert_with_connection(&connection, &draft)?;
+        if let Err(error) = cleanup_expired_with_connection(&mut connection, retention_days) {
+            log::warn!("历史记录已保存，但自动清理失败，将在下次启动重试: {error}");
+        }
+        Ok(id)
+    })
+    .await
+    .map_err(|error| format!("写入转写历史任务失败: {error}"))?
+}
+
+/// 写入一条历史，连接与事务边界由调用方决定。
+///
+/// 笔记转写要把「历史行 + 段转录」放进同一个事务，所以插入本身不能自己开连接；
+/// 保留期清理留给 [`insert`]，它需要独立的写事务，放进别人的事务里会嵌套。
+pub(crate) fn insert_with_connection(
+    connection: &Connection,
+    draft: &HistoryDraft,
+) -> Result<i64, String> {
+    let now = now_millis();
+    connection
+        .execute(
+            r#"
                 INSERT INTO transcription_history (
                     session_id, created_at, updated_at, mode, status, text, original_text,
                     duration_sec, language, engine, provider, model, app_process,
@@ -391,57 +409,59 @@ pub async fn insert(draft: HistoryDraft, retention_days: u32) -> Result<i64, Str
                     ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
                 )
                 "#,
-                params![
-                    i64::try_from(draft.session_id).unwrap_or(i64::MAX),
-                    now,
-                    draft.mode,
-                    draft.status,
-                    draft.text,
-                    draft.original_text,
-                    draft.duration_sec,
-                    draft.language,
-                    draft.engine,
-                    draft.provider,
-                    draft.model,
-                    draft.app_process,
-                    draft.app_window_title,
-                    draft.app_rule_name,
-                    draft.audio_file,
-                    draft.asr_ms.and_then(|value| i64::try_from(value).ok()),
-                    draft.polish_ms.and_then(|value| i64::try_from(value).ok()),
-                    draft.total_ms.and_then(|value| i64::try_from(value).ok()),
-                    draft.error,
-                    draft.reprocessed_from_id,
-                    draft.workflow,
-                    draft.source_text,
-                ],
-            )
-            .map_err(|error| format!("写入转写历史失败: {error}"))?;
-        let id = connection.last_insert_rowid();
-        if let Err(error) = cleanup_expired_with_connection(&mut connection, retention_days) {
-            log::warn!("历史记录已保存，但自动清理失败，将在下次启动重试: {error}");
-        }
-        Ok(id)
-    })
-    .await
-    .map_err(|error| format!("写入转写历史任务失败: {error}"))?
+            params![
+                i64::try_from(draft.session_id).unwrap_or(i64::MAX),
+                now,
+                &draft.mode,
+                &draft.status,
+                &draft.text,
+                &draft.original_text,
+                draft.duration_sec,
+                &draft.language,
+                &draft.engine,
+                &draft.provider,
+                &draft.model,
+                &draft.app_process,
+                &draft.app_window_title,
+                &draft.app_rule_name,
+                &draft.audio_file,
+                draft.asr_ms.and_then(|value| i64::try_from(value).ok()),
+                draft.polish_ms.and_then(|value| i64::try_from(value).ok()),
+                draft.total_ms.and_then(|value| i64::try_from(value).ok()),
+                &draft.error,
+                draft.reprocessed_from_id,
+                &draft.workflow,
+                &draft.source_text,
+            ],
+        )
+        .map_err(|error| format!("写入转写历史失败: {error}"))?;
+    Ok(connection.last_insert_rowid())
 }
 
 pub async fn get(id: i64) -> Result<Option<StoredHistoryRecord>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
         let connection = db::open()?;
-        connection
-            .query_row(
-                &format!("SELECT {HISTORY_COLUMNS} FROM transcription_history WHERE id = ?1"),
-                params![id],
-                map_stored_record,
-            )
-            .optional()
-            .map_err(|error| format!("读取转写历史失败: {error}"))
+        get_with_connection(&connection, id)
     })
     .await
     .map_err(|error| format!("读取转写历史任务失败: {error}"))?
+}
+
+/// 按 id 读一条历史。连接由调用方给：`commands/notes.rs` 的「存为笔记」要在
+/// 同一个事务里读历史、写笔记，不能各开一条连接。
+pub(crate) fn get_with_connection(
+    connection: &Connection,
+    id: i64,
+) -> Result<Option<StoredHistoryRecord>, String> {
+    connection
+        .query_row(
+            &format!("SELECT {HISTORY_COLUMNS} FROM transcription_history WHERE id = ?1"),
+            params![id],
+            map_stored_record,
+        )
+        .optional()
+        .map_err(|error| format!("读取转写历史失败: {error}"))
 }
 
 /// 原子读取待重处理记录并为其音频建立租约。删除命令与这里都使用 IMMEDIATE
@@ -841,55 +861,58 @@ pub async fn update_total_ms(id: i64, total_ms: u64) -> Result<bool, String> {
     .map_err(|error| format!("更新历史总耗时任务失败: {error}"))?
 }
 
+/// 一次「重写历史转写」要用到的字段。
+///
+/// 打包成结构体而不是继续摊参数：加上连接之后是 8 个参数，既过不了 clippy 的
+/// `too_many_arguments`，调用点也难看出哪一列对应哪个值。
+pub(crate) struct TranscriptionUpdate<'a> {
+    pub text: &'a str,
+    pub engine: &'a str,
+    pub language: Option<String>,
+    pub asr_ms: Option<u64>,
+    pub total_ms: Option<u64>,
+    pub duration_sec: Option<f64>,
+}
+
 /// 就地重写一条历史行的转写结果（笔记「重新转写」用）。
 ///
 /// 为什么不新插一行：同一条录音重转 N 次会堆出 N 条重复历史，而笔记段表只能
 /// 指向最新那条 —— 旧行在历史页点「打开笔记」就会变成「笔记已删除」的死链。
 /// 这里保留 `id` / `created_at`，只换文本、引擎与耗时，历史列表顺序也不跳。
-pub async fn update_transcription_result(
+///
+/// 返回 `false` 表示这一行已经不在了（多半是被保留期清掉），调用方要决定补插。
+pub(crate) fn update_transcription_result_with_connection(
+    connection: &Connection,
     id: i64,
-    text: &str,
-    engine: &str,
-    language: Option<String>,
-    asr_ms: Option<u64>,
-    total_ms: Option<u64>,
-    duration_sec: Option<f64>,
+    update: &TranscriptionUpdate<'_>,
 ) -> Result<bool, String> {
-    let asr_ms = asr_ms.and_then(|value| i64::try_from(value).ok());
-    let text = text.to_string();
-    let engine = engine.to_string();
-    initialize().await?;
-    tokio::task::spawn_blocking(move || {
-        let connection = db::open()?;
-        connection
-            .execute(
-                "UPDATE transcription_history SET \
-                    text = ?2, original_text = ?2, engine = ?3, \
-                    language = COALESCE(?4, language), \
-                    asr_ms = COALESCE(?5, asr_ms), \
-                    total_ms = COALESCE(?6, total_ms), \
-                    duration_sec = COALESCE(?7, duration_sec), \
-                    updated_at = ?8 \
-                 WHERE id = ?1",
-                params![
-                    id,
-                    text,
-                    engine,
-                    language,
-                    asr_ms,
-                    total_ms.and_then(|value| i64::try_from(value).ok()),
-                    duration_sec,
-                    now_millis()
-                ],
-            )
-            .map(|changed| changed > 0)
-            .map_err(|error| format!("重写历史转写失败: {error}"))
-    })
-    .await
-    .map_err(|error| format!("重写历史转写任务失败: {error}"))?
+    connection
+        .execute(
+            "UPDATE transcription_history SET \
+                text = ?2, original_text = ?2, engine = ?3, \
+                language = COALESCE(?4, language), \
+                asr_ms = COALESCE(?5, asr_ms), \
+                total_ms = COALESCE(?6, total_ms), \
+                duration_sec = COALESCE(?7, duration_sec), \
+                updated_at = ?8 \
+             WHERE id = ?1",
+            params![
+                id,
+                update.text,
+                update.engine,
+                update.language,
+                update.asr_ms.and_then(|value| i64::try_from(value).ok()),
+                update.total_ms.and_then(|value| i64::try_from(value).ok()),
+                update.duration_sec,
+                now_millis()
+            ],
+        )
+        .map(|changed| changed > 0)
+        .map_err(|error| format!("重写历史转写失败: {error}"))
 }
 
-fn cleanup_expired_with_connection(
+/// 按保留期清掉过期历史。连接与事务由本函数自己开，调用方要放在写事务**之后**。
+pub(crate) fn cleanup_expired_with_connection(
     connection: &mut Connection,
     retention_days: u32,
 ) -> Result<u64, String> {

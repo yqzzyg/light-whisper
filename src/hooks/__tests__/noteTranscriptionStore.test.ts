@@ -49,7 +49,6 @@ function detail(overrides: Partial<NoteDetail> = {}): NoteDetail {
     kind: "meeting",
     durationSec: 600,
     historyId: 9,
-    audioFile: "note-1-1.wav",
     createdAt: 1,
     updatedAt: 1_700_000_000_000,
     ...overrides,

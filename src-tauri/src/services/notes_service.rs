@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 
 use crate::db;
+use crate::services::history_service;
 
-const NOTES_SCHEMA_VERSION: i64 = 2;
+const NOTES_SCHEMA_VERSION: i64 = 3;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
 /// 合法的笔记类型，与前端 `NoteKind` 一致。
@@ -45,7 +46,7 @@ fn now_millis() -> i64 {
 fn migrate_schema(connection: &Connection) -> Result<(), String> {
     // `notes` 与 `note_recordings` 的 `history_id` 是指向 `transcription_history` 的外键，
     // SQLite 建表时会校验父表存在，所以历史模块必须先建。两步各自开事务，不能嵌套。
-    crate::services::history_service::migrate_schema(connection)?;
+    history_service::migrate_schema(connection)?;
     db::migrate_module(
         connection,
         "notes",
@@ -77,7 +78,7 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                     kind                 TEXT    NOT NULL DEFAULT 'personal',
                     duration_sec         REAL,
                     history_id           INTEGER REFERENCES transcription_history(id) ON DELETE SET NULL,
-                    audio_file           TEXT,
+                    audio_file           TEXT,  -- v1 的单槽录音，v3 删除
                     created_at           INTEGER NOT NULL,
                     updated_at           INTEGER NOT NULL
                 );
@@ -114,6 +115,23 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                 "#,
                 )
                 .map_err(|error| format!("升级笔记数据库到多段录音失败: {error}"))?;
+            }
+            if current < 3 {
+                // v2 起 `notes.audio_file` 就被 `note_recordings` 取代，迁移时已置 NULL，
+                // 之后再没有任何写入。留着这一列只会让人误以为笔记还有第二个音频事实源，
+                // 对应的 `NoteDetail.audioFile` 也恒为 null——一并删掉。
+                //
+                // 顺手补一条唯一索引：一条历史只能转出一篇笔记。应用层已经有查重，
+                // 这里让引擎也守住，避免并发连点漏出两条。
+                transaction
+                    .execute_batch(
+                        r#"
+                ALTER TABLE notes DROP COLUMN audio_file;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_history
+                    ON notes(history_id) WHERE history_id IS NOT NULL;
+                "#,
+                    )
+                    .map_err(|error| format!("清理笔记音频列失败: {error}"))?;
             }
             Ok(())
         },
@@ -183,7 +201,6 @@ pub struct NoteDetail {
     pub kind: String,
     pub duration_sec: Option<f64>,
     pub history_id: Option<i64>,
-    pub audio_file: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -421,7 +438,7 @@ const LIST_ITEM_COLUMNS: &str = "n.id, n.folder_id, n.title, n.kind, \
 
 const DETAIL_COLUMNS: &str = "n.id, n.folder_id, n.title, n.content, n.transcript, n.summary, \
      n.summary_model, n.summary_generated_at, n.summary_source_hash, n.kind, n.duration_sec, \
-     n.history_id, n.audio_file, n.created_at, n.updated_at";
+     n.history_id, n.created_at, n.updated_at";
 
 fn list_item_from_row(row: &Row<'_>) -> rusqlite::Result<NoteListItem> {
     Ok(NoteListItem {
@@ -485,9 +502,8 @@ fn detail_from_row(row: &Row<'_>) -> rusqlite::Result<NoteDetail> {
         kind: row.get(9)?,
         duration_sec: row.get(10)?,
         history_id: row.get(11)?,
-        audio_file: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -1047,7 +1063,7 @@ fn delete_recording_with_connection(
     Ok(Some((recording.note_id, recording.audio_file)))
 }
 
-fn set_recording_transcript_with_connection(
+pub(crate) fn set_recording_transcript_with_connection(
     connection: &Connection,
     id: i64,
     transcript: &str,
@@ -1323,20 +1339,85 @@ pub async fn delete_note_recording(id: i64) -> Result<Option<(i64, String)>, Str
     .map_err(|error| format!("删除笔记录音任务失败: {error}"))?
 }
 
-/// 写一段的转录，并重算笔记聚合转录。
-pub async fn set_note_recording_transcript(
-    id: i64,
-    transcript: &str,
-    history_id: Option<i64>,
-) -> Result<Option<NoteRecording>, String> {
+/// 笔记转写的落库：写历史行 + 写回该段转录，同一个事务。
+///
+/// 之前这两步各开一条连接，转写期间笔记被删就会在历史里留下一条没人认领的行。
+/// `reuse_history` 有值时**就地更新**那条历史（重新转写不堆重复记录），没有才新插。
+/// 保留期清理放在提交之后：它自己要开写事务，塞进本事务会嵌套。
+pub async fn save_recording_transcription(
+    recording_id: i64,
+    draft: history_service::HistoryDraft,
+    reuse_history: Option<i64>,
+    retention_days: u32,
+) -> Result<i64, String> {
     initialize().await?;
-    let transcript = transcript.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = db::open()?;
-        set_recording_transcript_with_connection(&connection, id, &transcript, history_id)
+        let mut connection = db::open()?;
+        let history_id = save_recording_transcription_with_connection(
+            &mut connection,
+            recording_id,
+            draft,
+            reuse_history,
+        )?;
+        if let Err(error) =
+            history_service::cleanup_expired_with_connection(&mut connection, retention_days)
+        {
+            log::warn!("笔记转录已保存，但历史保留期清理失败，将在下次启动重试: {error}");
+        }
+        Ok(history_id)
     })
     .await
-    .map_err(|error| format!("保存分段转录任务失败: {error}"))?
+    .map_err(|error| format!("保存笔记转录任务失败: {error}"))?
+}
+
+fn save_recording_transcription_with_connection(
+    connection: &mut Connection,
+    recording_id: i64,
+    draft: history_service::HistoryDraft,
+    reuse_history: Option<i64>,
+) -> Result<i64, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("开始转写落库事务失败: {error}"))?;
+    let history_id = match reuse_history {
+        Some(existing) => {
+            let updated = history_service::update_transcription_result_with_connection(
+                &transaction,
+                existing,
+                &history_service::TranscriptionUpdate {
+                    text: &draft.text,
+                    engine: &draft.engine,
+                    language: draft.language.clone(),
+                    asr_ms: draft.asr_ms,
+                    total_ms: draft.total_ms,
+                    duration_sec: draft.duration_sec,
+                },
+            )?;
+            // 旧行在「读出段」到「写回结果」之间被保留期清掉了：补插一条，
+            // 而不是拿着一个已消失的 id 去写外键。
+            if updated {
+                existing
+            } else {
+                history_service::insert_with_connection(&transaction, &draft)?
+            }
+        }
+        None => history_service::insert_with_connection(&transaction, &draft)?,
+    };
+    // 段被删掉了就整段回滚：历史行不能留下来当孤儿。
+    let written = set_recording_transcript_with_connection(
+        &transaction,
+        recording_id,
+        &draft.text,
+        Some(history_id),
+    )?
+    .is_some();
+    if !written {
+        return Err("这篇笔记已被删除".to_string());
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交转写落库事务失败: {error}"))?;
+    Ok(history_id)
 }
 
 fn create_note_from_transcript_with_connection(
@@ -1363,36 +1444,63 @@ fn create_note_from_transcript_with_connection(
     Ok((detail, true))
 }
 
-/// 从历史记录生成笔记：建笔记 + 写转录在同一次连接内完成，避免半成品。
+/// 笔记标题取正文首个非空行的前 40 字：历史记录没有标题字段，只能从转录里摘。
+fn derive_title(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let stripped = first.trim_start_matches(['#', '>', '-', '*', '+', ' ']);
+    stripped.chars().take(40).collect()
+}
+
+/// 「历史记录 → 笔记」：读历史、查重、建笔记、写转录在同一个事务里。
 ///
-/// 同一条历史记录重复调用返回已有笔记（第二个返回值为 `false`），连点不会
-/// 产生多条重复笔记。音频不复制，由 `history_id` 反向引用历史记录。
-pub async fn create_note_from_transcript(
-    folder_id: Option<i64>,
-    title: &str,
-    kind: &str,
-    transcript: &str,
-    duration_sec: Option<f64>,
+/// 两件事必须一起成立：历史行是笔记的引用来源，笔记是历史文本的落地。之前读历史
+/// 与写笔记各开一条连接，保留期 GC 正好插在中间时笔记会带着一个已消失的
+/// `history_id` 落库，或者反过来在历史里留下没人认领的行。
+pub async fn create_note_from_history(
     history_id: i64,
-) -> Result<(NoteDetail, bool), String> {
+    folder_id: Option<i64>,
+) -> Result<NoteDetail, String> {
     initialize().await?;
-    let title = title.to_string();
-    let kind = kind.to_string();
-    let transcript = transcript.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = db::open()?;
-        create_note_from_transcript_with_connection(
-            &connection,
-            folder_id,
-            &title,
-            &kind,
-            &transcript,
-            duration_sec,
-            history_id,
-        )
+        let mut connection = db::open()?;
+        create_note_from_history_with_connection(&mut connection, history_id, folder_id)
     })
     .await
-    .map_err(|error| format!("创建笔记任务失败: {error}"))?
+    .map_err(|error| format!("保存笔记任务失败: {error}"))?
+}
+
+fn create_note_from_history_with_connection(
+    connection: &mut Connection,
+    history_id: i64,
+    folder_id: Option<i64>,
+) -> Result<NoteDetail, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("开始存为笔记事务失败: {error}"))?;
+    let stored = history_service::get_with_connection(&transaction, history_id)?
+        .ok_or_else(|| "历史记录不存在，可能已被删除".to_string())?;
+    let transcript = stored.record.text.trim().to_string();
+    if transcript.is_empty() {
+        return Err("这条记录没有转写文本，无法存为笔记".into());
+    }
+    let title = derive_title(&transcript);
+    let (note, _) = create_note_from_transcript_with_connection(
+        &transaction,
+        folder_id,
+        &title,
+        "import",
+        &transcript,
+        stored.record.duration_sec,
+        history_id,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交存为笔记事务失败: {error}"))?;
+    Ok(note)
 }
 
 #[cfg(test)]
@@ -1864,7 +1972,6 @@ mod tests {
             .unwrap();
         assert_eq!(updated.transcript.as_deref(), Some("第一段\n\n第二段"));
         assert!((updated.duration_sec.unwrap() - 91.5).abs() < 1e-9);
-        assert!(updated.audio_file.is_none());
         assert_eq!(
             list_recordings_with_connection(&connection, note.id).unwrap()[1].history_id,
             Some(42)
@@ -1883,10 +1990,10 @@ mod tests {
     }
 
     #[test]
-    fn migration_v1_to_v2_moves_the_single_audio_into_a_recording() {
+    fn migration_moves_single_audio_into_a_recording_then_drops_the_column() {
         let connection = Connection::open_in_memory().unwrap();
         // 老库里的 history_id 指向真实历史行，先建历史表并造一条。
-        crate::services::history_service::migrate_schema(&connection).unwrap();
+        history_service::migrate_schema(&connection).unwrap();
         seed_history(&connection, &[7]);
         connection
             .execute_batch(
@@ -1910,12 +2017,16 @@ mod tests {
         assert_eq!(recordings[0].audio_file, "old.wav");
         assert_eq!(recordings[0].transcript.as_deref(), Some("旧转录"));
         assert_eq!(recordings[0].history_id, Some(7));
-        let legacy: Option<String> = connection
-            .query_row("SELECT audio_file FROM notes WHERE id = 1", [], |row| {
-                row.get(0)
-            })
+        // v3 把这一列彻底删掉：音频只归 note_recordings，notes 不再有第二个事实源。
+        let column_exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('notes') WHERE name = 'audio_file'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
             .unwrap();
-        assert!(legacy.is_none(), "迁移后 notes 不能再持有音频引用");
+        assert!(column_exists.is_none(), "v3 之后 notes.audio_file 应已删除");
         let version: i64 = connection
             .query_row(
                 "SELECT version FROM schema_meta WHERE module = 'notes'",
@@ -1923,7 +2034,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, NOTES_SCHEMA_VERSION);
     }
 
     /// 合并成一个库之后，历史行被淘汰只应断开笔记侧的引用。
@@ -2035,5 +2146,194 @@ mod tests {
         assert_eq!(first.id, second.id);
         let page = list_notes_with_connection(&connection, &query(None, false, "")).unwrap();
         assert_eq!(page.total, 1);
+    }
+
+    /// 「历史 → 笔记」现在是一次事务：读历史、查重、建笔记、写转录一起成败。
+    #[test]
+    fn create_note_from_history_reads_and_writes_in_one_transaction() {
+        let mut connection = memory_connection();
+        // 这一行的正文决定标题与转录，所以单独造一条文本明确的记录。
+        connection
+            .execute(
+                "INSERT INTO transcription_history \
+                 (id, session_id, created_at, updated_at, mode, status, text, original_text, \
+                  duration_sec, engine) \
+                 VALUES (123, 1, 0, 0, 'import', 'success', '# 产品评审\n正文', '# 产品评审\n正文', \
+                  90.0, 'local')",
+                [],
+            )
+            .unwrap();
+
+        let note = create_note_from_history_with_connection(&mut connection, 123, None).unwrap();
+        assert_eq!(note.title, "产品评审");
+        assert_eq!(note.transcript.as_deref(), Some("# 产品评审\n正文"));
+        assert_eq!(note.duration_sec, Some(90.0));
+        assert_eq!(note.history_id, Some(123));
+
+        // 重复调用返回同一条，不产生第二篇。
+        let again = create_note_from_history_with_connection(&mut connection, 123, None).unwrap();
+        assert_eq!(again.id, note.id);
+
+        // 历史不存在时既不建笔记也不报 SQL 错误。
+        let error = create_note_from_history_with_connection(&mut connection, 999, None)
+            .expect_err("missing history should fail");
+        assert!(error.contains("不存在"));
+    }
+
+    /// 段已被删时，同一事务里刚插入的历史行必须一起回滚。
+    #[test]
+    fn save_recording_transcription_rolls_back_the_history_row() {
+        let mut connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
+        let recording = add_recording_with_connection(&connection, note.id, "a.wav", Some(10.0))
+            .unwrap()
+            .unwrap();
+
+        let draft = |text: &str| history_service::HistoryDraft {
+            session_id: 1,
+            mode: "note".into(),
+            workflow: "note".into(),
+            status: "success".into(),
+            text: text.to_string(),
+            original_text: text.to_string(),
+            source_text: None,
+            duration_sec: Some(10.0),
+            language: Some("zh".into()),
+            engine: "local".into(),
+            provider: None,
+            model: None,
+            app_process: None,
+            app_window_title: None,
+            app_rule_name: None,
+            audio_file: None,
+            asr_ms: Some(100),
+            polish_ms: None,
+            total_ms: Some(120),
+            error: None,
+            reprocessed_from_id: None,
+        };
+
+        // 正常路径：历史与段转录一起落库。
+        let history_id = save_recording_transcription_with_connection(
+            &mut connection,
+            recording.id,
+            draft("第一段"),
+            None,
+        )
+        .unwrap();
+        let stored = get_recording_with_connection(&connection, recording.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.transcript.as_deref(), Some("第一段"));
+        assert_eq!(stored.history_id, Some(history_id));
+
+        // 段不存在：历史行不能留下来。
+        let before = count_history(&connection);
+        let error = save_recording_transcription_with_connection(
+            &mut connection,
+            9999,
+            draft("孤儿"),
+            None,
+        )
+        .expect_err("missing recording should fail");
+        assert!(error.contains("已被删除"));
+        assert_eq!(count_history(&connection), before, "失败时不应多出历史行");
+    }
+
+    /// 重新转写沿用原历史行；原行已被保留期清掉时补插一条，不拿死 id 去写外键。
+    #[test]
+    fn save_recording_transcription_reuses_or_recreates_the_history_row() {
+        let mut connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
+        let recording = add_recording_with_connection(&connection, note.id, "a.wav", Some(10.0))
+            .unwrap()
+            .unwrap();
+        let draft = |text: &str| history_service::HistoryDraft {
+            session_id: 1,
+            mode: "note".into(),
+            workflow: "note".into(),
+            status: "success".into(),
+            text: text.to_string(),
+            original_text: text.to_string(),
+            source_text: None,
+            duration_sec: Some(10.0),
+            language: None,
+            engine: "local".into(),
+            provider: None,
+            model: None,
+            app_process: None,
+            app_window_title: None,
+            app_rule_name: None,
+            audio_file: None,
+            asr_ms: None,
+            polish_ms: None,
+            total_ms: None,
+            error: None,
+            reprocessed_from_id: None,
+        };
+
+        let first = save_recording_transcription_with_connection(
+            &mut connection,
+            recording.id,
+            draft("初稿"),
+            None,
+        )
+        .unwrap();
+        let before = count_history(&connection);
+
+        // 复用：行数不变，内容被覆盖。
+        let reused = save_recording_transcription_with_connection(
+            &mut connection,
+            recording.id,
+            draft("重转"),
+            Some(first),
+        )
+        .unwrap();
+        assert_eq!(reused, first);
+        assert_eq!(count_history(&connection), before);
+        let text: String = connection
+            .query_row(
+                "SELECT text FROM transcription_history WHERE id = ?1",
+                params![first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "重转");
+
+        // 原行已不在：补插一条，段指向新行，外键仍然成立。
+        let recreated = save_recording_transcription_with_connection(
+            &mut connection,
+            recording.id,
+            draft("补插"),
+            Some(9999),
+        )
+        .unwrap();
+        assert_ne!(recreated, first);
+        let stored = get_recording_with_connection(&connection, recording.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.history_id, Some(recreated));
+    }
+
+    fn count_history(connection: &Connection) -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM transcription_history", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn note_title_comes_from_the_first_content_line() {
+        assert_eq!(derive_title("周会纪要\n\n第二段"), "周会纪要");
+        assert_eq!(derive_title("# 标题行\n正文"), "标题行");
+        assert_eq!(derive_title("\n\n  第二行才有内容"), "第二行才有内容");
+        assert_eq!(derive_title(""), "");
+    }
+
+    #[test]
+    fn note_title_is_capped_without_splitting_characters() {
+        let title = derive_title(&"会".repeat(60));
+        assert_eq!(title.chars().count(), 40);
     }
 }

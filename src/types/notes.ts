@@ -38,11 +38,6 @@ export interface NoteDetail {
   kind: NoteKind;
   durationSec: number | null;
   historyId: number | null;
-  /**
-   * @deprecated 录音已改由段表 `NoteRecording` 持有，后端迁移后此列恒为 `null`。
-   * 判断「有没有录音」请用 `recordings`，不要再读这个字段。
-   */
-  audioFile: string | null;
   createdAt: number;
   updatedAt: number;
 }

@@ -116,6 +116,11 @@ created_at, updated_at
 > `PRAGMA user_version`），代码边界仍由 `history_service` / `notes_service` 承担。
 > `notes.history_id`、`note_recordings.history_id` 现在是指向 `transcription_history(id)`
 > 的真外键，`ON DELETE SET NULL`。原文关于音频独立目录 `notes_audio/` 的结论不变。
+>
+> **v3 追加**：`notes.audio_file` 整列删除（v2 起已由 `note_recordings` 取代，迁移后恒为
+> NULL），`NoteDetail.audioFile` 字段同步移除；`notes(history_id)` 加唯一索引，一条历史
+> 只能转出一篇笔记。下面两段 SQL 里残留的 `audio_file` 是 v1 的历史形态，仅供追溯。
+> 「历史 → 存为笔记」与笔记转写落库已各自收进单个 `IMMEDIATE` 事务，不再跨连接。
 
 ```sql
 CREATE TABLE note_folders (

@@ -173,46 +173,16 @@ pub async fn move_note(
     notes_service::move_note(id, folder_id).await
 }
 
-/// 用正文首行做标题：去掉行首的 Markdown 前缀符号，超过 40 字截断。
-///
-/// 历史记录本身没有标题，让用户面对一列「未命名笔记」无法区分。
-fn derive_note_title(text: &str) -> String {
-    let first = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("");
-    let stripped = first.trim_start_matches(['#', '>', '-', '*', '+', ' ']);
-    stripped.chars().take(40).collect()
-}
-
 /// 历史记录 → 笔记：转录、时长、`history_id` 一起带过去，音频不复制。
 ///
-/// 同一条历史记录重复调用返回已有笔记，用户连点不会堆出重复笔记。
+/// 同一条历史记录重复调用返回已有笔记，用户连点不会堆出重复笔记。读历史与写笔记
+/// 由存储层放进同一个事务（`notes_service::create_note_from_history`），这里只转发。
 #[tauri::command]
 pub async fn create_note_from_history(
     history_id: i64,
     folder_id: Option<i64>,
 ) -> Result<notes_service::NoteDetail, String> {
-    let stored = crate::services::history_service::get(history_id)
-        .await?
-        .ok_or_else(|| "历史记录不存在，可能已被删除".to_string())?;
-    let record = stored.record;
-    let transcript = record.text.trim().to_string();
-    if transcript.is_empty() {
-        return Err("这条记录没有转写文本，无法存为笔记".into());
-    }
-    let title = derive_note_title(&transcript);
-    let (note, _) = notes_service::create_note_from_transcript(
-        folder_id,
-        &title,
-        "import",
-        &transcript,
-        record.duration_sec,
-        history_id,
-    )
-    .await?;
-    Ok(note)
+    notes_service::create_note_from_history(history_id, folder_id).await
 }
 
 /// 历史记录反查笔记 id：历史卡片上的「打开笔记」用它跳转。
@@ -290,21 +260,7 @@ pub async fn save_text_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_note_title, sanitize_file_name};
-
-    #[test]
-    fn note_title_comes_from_the_first_content_line() {
-        assert_eq!(derive_note_title("周会纪要\n\n第二段"), "周会纪要");
-        assert_eq!(derive_note_title("# 标题行\n正文"), "标题行");
-        assert_eq!(derive_note_title("\n\n  第二行才有内容"), "第二行才有内容");
-        assert_eq!(derive_note_title(""), "");
-    }
-
-    #[test]
-    fn note_title_is_capped_without_splitting_characters() {
-        let title = derive_note_title(&"会".repeat(60));
-        assert_eq!(title.chars().count(), 40);
-    }
+    use super::sanitize_file_name;
 
     #[test]
     fn export_file_name_keeps_only_the_last_segment() {

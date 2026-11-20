@@ -75,7 +75,6 @@ function detail(id: number, title: string): NoteDetail {
     kind: "personal",
     durationSec: null,
     historyId: null,
-    audioFile: null,
     createdAt: 1,
     updatedAt: 1,
   };

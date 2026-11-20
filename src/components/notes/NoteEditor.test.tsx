@@ -91,7 +91,6 @@ function detail(overrides: Partial<NoteDetail> = {}): NoteDetail {
     kind: "meeting",
     durationSec: 600,
     historyId: null,
-    audioFile: null,
     createdAt: 1,
     updatedAt: 1_700_000_000_000,
     ...overrides,
@@ -611,7 +610,7 @@ describe("NoteEditor", () => {
 
   it("keeps the pending hint when one of several segments still lacks a transcript", () => {
     setup({
-      note: detail({ transcript: "第一段", audioFile: null }),
+      note: detail({ transcript: "第一段" }),
       recordings: [
         recording({ id: 1, sortOrder: 0, transcript: "第一段" }),
         recording({ id: 2, sortOrder: 1 }),

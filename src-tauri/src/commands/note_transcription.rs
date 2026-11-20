@@ -127,30 +127,16 @@ impl TranscribeRun<'_> {
             asr_ms,
             Some(elapsed_ms(self.started)),
         );
-        let history_id = match reuse_history {
-            Some(existing) => {
-                history_service::update_transcription_result(
-                    existing,
-                    &text,
-                    &draft.engine,
-                    draft.language,
-                    asr_ms,
-                    draft.total_ms,
-                    draft.duration_sec,
-                )
-                .await
-                .map_err(|error| AppError::Asr(format!("更新转写历史失败: {error}")))?;
-                existing
-            }
-            None => history_service::insert(draft, self.retention_days)
-                .await
-                .map_err(|error| AppError::Asr(format!("保存转写历史失败: {error}")))?,
-        };
-
-        notes_service::set_note_recording_transcript(recording.id, &text, Some(history_id))
-            .await
-            .map_err(AppError::Asr)?
-            .ok_or_else(|| AppError::Asr(format!("{error_prefix}：这篇笔记已被删除")))?;
+        // 历史行与该段转录在同一个事务里落库：笔记被删时历史一起回滚，不会留下
+        // 没人认领的记录；重新转写则就地更新原来的历史行。
+        let history_id = notes_service::save_recording_transcription(
+            recording.id,
+            draft,
+            reuse_history,
+            self.retention_days,
+        )
+        .await
+        .map_err(|error| AppError::Asr(format!("{error_prefix}：{error}")))?;
         let _ = self
             .app
             .emit("history-updated", serde_json::json!({ "id": history_id }));

@@ -2013,14 +2013,17 @@
         "src-tauri/src/commands/notes.rs#export_file_name_keeps_only_the_last_segment",
         "src-tauri/src/services/notes_service.rs#note_from_history_carries_transcript_and_duration",
         "src-tauri/src/services/notes_service.rs#note_from_history_is_idempotent_per_history_record",
-        "src-tauri/src/commands/notes.rs#note_title_comes_from_the_first_content_line",
+        "src-tauri/src/services/notes_service.rs#note_title_comes_from_the_first_content_line",
         "src-tauri/src/services/wav_writer.rs#repair_header_backfills_an_interrupted_recording",
         "src-tauri/src/services/wav_writer.rs#appended_samples_are_readable_after_finish",
         "src-tauri/src/services/note_recording_service.rs#drain_appends_pending_samples_and_publishes_peak_level",
         "src-tauri/src/services/note_recording_service.rs#snapshot_is_idle_without_a_session",
         "src-tauri/src/services/notes_service.rs#audio_file_names_lists_only_referenced_recordings",
         "src-tauri/src/services/notes_service.rs#recordings_are_appended_and_recomputed_into_the_note",
-        "src-tauri/src/services/notes_service.rs#migration_v1_to_v2_moves_the_single_audio_into_a_recording",
+        "src-tauri/src/services/notes_service.rs#migration_moves_single_audio_into_a_recording_then_drops_the_column",
+        "src-tauri/src/services/notes_service.rs#create_note_from_history_reads_and_writes_in_one_transaction",
+        "src-tauri/src/services/notes_service.rs#save_recording_transcription_rolls_back_the_history_row",
+        "src-tauri/src/services/notes_service.rs#save_recording_transcription_reuses_or_recreates_the_history_row",
         "src-tauri/src/commands/note_transcription.rs#note_history_keeps_the_audio_out_of_the_history_table",
         "src-tauri/src/services/audio_chunk_service.rs#chunker_splits_into_contiguous_blocks_without_losing_samples",
         "src-tauri/src/services/audio_chunk_service.rs#silence_snapping_moves_the_cut_into_the_quiet_gap",
@@ -2028,7 +2031,7 @@
         "src-tauri/src/state/app_state.rs#a_second_transcription_is_rejected_while_one_runs",
         "src-tauri/src/services/transcription_service.rs#local_engines_are_everything_but_the_two_online_ones"
       ],
-      "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. notes.sqlite3 is independent of the history database and never shares its audio GC or lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. The model bounds one folder and two notes; it is not a refinement of the Rust source."
+      "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. Notes and history now share one database file but keep separate tables: notes_table never touches transcription_history rows or the history audio GC/lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. Cross-module writes (history row + recording transcript, history read + note insert) are single transactions in Rust, which is why this model keeps the note and history sides independent. The model bounds one folder and two notes; it is not a refinement of the Rust source."
     }
   },
   "runs": {
