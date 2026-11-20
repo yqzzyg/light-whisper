@@ -1,17 +1,16 @@
 //! 应用唯一的 SQLite 数据库文件。
 //!
-//! 历史与笔记共用 `minutes.sqlite3`。合并的理由是一致性边界：一次笔记转写要同时写
-//! 历史行和笔记 transcript；「历史存为笔记」要读一侧写另一侧。拆成两个文件时这些
-//! 操作既没有事务也没有外键，只能靠调用方手工兜底，删笔记后历史行会变成悬空指针。
+//! 历史与笔记同在这个文件里，因为跨模块写必须原子：一次笔记转写要同时写历史行
+//! 和笔记 transcript；「历史存为笔记」要读一侧写另一侧。分开存这两处就没有事务
+//! 也没有外键，只能靠调用方手工兜底，删笔记后历史行会变成悬空指针。
 //!
-//! 合并只发生在存储层：
+//! 表名按模块划分：`transcription_history` / `history_audio_leases` 归历史，
+//! `notes` / `note_recordings` / `note_folders` 归笔记。代码边界由
+//! `history_service` / `notes_service` 承担，互不直接调用对方 SQL。
 //!
-//! - 表名仍按模块划分：`transcription_history` / `history_audio_leases` 归历史，
-//!   `notes` / `note_recordings` / `note_folders` 归笔记。
-//! - 代码边界仍由 `history_service` / `notes_service` 承担，互不直接调用对方 SQL。
-//! - 唯一新增的跨模块约束是 `notes.history_id`、`note_recordings.history_id` 指向
-//!   `transcription_history(id)`，`ON DELETE SET NULL`：历史被保留期淘汰时只断开引用，
-//!   笔记本身不受影响。
+//! 跨模块约束是 `notes.history_id`、`note_recordings.history_id` 指向
+//! `transcription_history(id)`，`ON DELETE SET NULL`：历史被保留期淘汰时只断开引用，
+//! 笔记本身不受影响。
 //!
 //! 版本管理：单文件只有一个 `PRAGMA user_version` 槽，两个模块会互相覆盖，因此各模块的
 //! 版本记在 `schema_meta(module, version)`，各自独立推进。
@@ -47,7 +46,7 @@ pub fn path() -> PathBuf {
 
 /// 打开一个已配置好的连接。
 ///
-/// 沿用各 service 原有的「每次操作开一个新连接」范式，所以这里不返回共享连接，
+/// 各 service 都是「每次操作开一个新连接」的范式，所以这里不返回共享连接，
 /// 也就不需要 `Mutex<Connection>` 包裹。
 pub fn open() -> Result<Connection, String> {
     let path = path();

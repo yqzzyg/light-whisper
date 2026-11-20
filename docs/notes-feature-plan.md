@@ -84,7 +84,7 @@ created_at, updated_at
 
 | 能力 | 位置 | 复用方式 |
 |---|---|---|
-| SQLite 迁移范式 | `src/db.rs`（WAL + `schema_meta(module, version)` + 每次开连接） | 笔记模块复用同一个文件与连接工厂，只推进自己的 `notes` 版本行（见 §3.2 变更说明；早期版本是独立 `notes.sqlite3`） |
+| SQLite 迁移范式 | `src/db.rs`（WAL + `schema_meta(module, version)` + 每次开连接） | 笔记模块复用同一个文件与连接工厂，只推进自己的 `notes` 版本行（见 §3.2） |
 | 录音链路 | `commands/audio.rs:500 start_recording` / `:514 stop_recording`，`RecordingContext` 常驻根部 | **不能直接复用**：见下方「耦合点」 |
 | 流式转写 | `transcription-result` 事件（`interim` 标记 + `sessionId`） | 仅作为可选的实时模式，一期不用 |
 | 采集原语 | `audio_service::spawn_audio_capture_thread(stop_flag, samples, device)`（返回设备采样率） | **笔记录音直接用它**：只采集、不转写 |
@@ -108,19 +108,18 @@ created_at, updated_at
 
 ### 3.2 数据模型（`minutes.sqlite3`）
 
-> **变更（架构调整）**：本节最初设计为独立的 `notes.sqlite3`，现已合并到与历史共用的
-> `minutes.sqlite3`。原因是一致性边界：「历史 → 存为笔记」和笔记转写都是跨模块写，拆两个文件
-> 时既没有事务也没有外键，删笔记后历史行会变成悬空指针。
+> 历史与笔记同在一个数据库文件里，因为「历史 → 存为笔记」和笔记转写都是跨模块写，
+> 拆两个文件时既没有事务也没有外键，删笔记后历史行会变成悬空指针。
 >
-> 现状：表与 schema 版本仍按模块划分（版本记在 `schema_meta(module, version)`，不再是
-> `PRAGMA user_version`），代码边界仍由 `history_service` / `notes_service` 承担。
-> `notes.history_id`、`note_recordings.history_id` 现在是指向 `transcription_history(id)`
-> 的真外键，`ON DELETE SET NULL`。原文关于音频独立目录 `notes_audio/` 的结论不变。
+> 表与 schema 版本按模块划分（版本记在 `schema_meta(module, version)`），代码边界由
+> `history_service` / `notes_service` 承担。`notes.history_id`、`note_recordings.history_id`
+> 是指向 `transcription_history(id)` 的真外键，`ON DELETE SET NULL`。音频独立目录
+> `notes_audio/` 的结论不变。
 >
-> **v3 追加**：`notes.audio_file` 整列删除（v2 起已由 `note_recordings` 取代，迁移后恒为
-> NULL），`NoteDetail.audioFile` 字段同步移除；`notes(history_id)` 加唯一索引，一条历史
+> `notes.audio_file` 整列已删除（v2 起由 `note_recordings` 取代，迁移后恒为 NULL），
+> `NoteDetail.audioFile` 字段同步移除；`notes(history_id)` 有唯一索引，一条历史
 > 只能转出一篇笔记。下面两段 SQL 里残留的 `audio_file` 是 v1 的历史形态，仅供追溯。
-> 「历史 → 存为笔记」与笔记转写落库已各自收进单个 `IMMEDIATE` 事务，不再跨连接。
+> 「历史 → 存为笔记」与笔记转写落库各自在单个 `IMMEDIATE` 事务里完成。
 
 ```sql
 CREATE TABLE note_folders (
@@ -525,10 +524,10 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 | 长转录摘要 | 无 token 计数器，只能按字符估算，可能超出模型窗口 | 用保守预算（12k 字符/块）+ 失败重试降块；错误提示要具体 |
 | 删除语义 | 一期无回收站，误删不可恢复 | 删除前二次确认；若加软删除，成本不高（`deleted_at` + 列表过滤） |
 | 摘要质量 | 本地小模型易丢数字与人名 | 沿用 openwhispr 已验证的提示（强调不得编造、保留专名与数字），并在 UI 标注「AI 生成，需核对」 |
-| 数据迁移 | 与历史同库但表独立（原设计为独立新库，已按 §3.2 变更说明合并） | 无历史数据时不需迁移；老库文件由开发期直接丢弃 |
+| 数据迁移 | 与历史同库但表独立（见 §3.2） | 无历史数据时不需迁移；老库文件由开发期直接丢弃 |
 | 笔记音频无人回收 | `notes_audio/` 不归历史 GC 管，删笔记/崩溃残留会越积越多（1 小时约 115MB） | 三处回收：删笔记删文件、删目录级联、启动扫未被 notes 引用的残留；配套单测 + 一个「磁盘占用」可见性（设置页显示目录大小，可选） |
 | 历史记录无音频 | 笔记转写写的历史行 `audio_file=NULL`，历史页播放按钮消失，用户可能以为录音丢了 | 历史详情对 `mode="note"` 显示「录音在笔记中」并可跳转；不复制音频是刻意取舍（否则 1 小时多 115MB） |
-| 录音与笔记一致性 | 停止录音时文件写失败，笔记可能只剩时长没有音频 | 先落文件、回填头，再写 `notes.audio_file`；任一步失败就整体回滚并明确报错。转写失败不影响录音与手写笔记 |
+| 录音与笔记一致性 | 停止录音时文件写失败，笔记可能只剩时长没有音频 | 先落文件、回填头，再写 `note_recordings`；任一步失败就整体回滚并明确报错。转写失败不影响录音与手写笔记 |
 | 先录后转的等待感 | 1 小时会议点「转文字」后约 3 分钟没结果，容易被当成失败 | 已用时 + 预估区间 + 完成 toast + 明确「可以切走」；失败文案要区分「录音没录上」与「转写失败」 |
 | 忘记点「转文字」 | 笔记长期只有音频没文本，摘要也就无从生成 | 列表与详情标「未转写」，摘要在无转录时给出「先转文字」引导，而不是灰按钮不解释 |
 | 一次性转写没有块级进度 | 用户等约 3 分钟看不到进展，误判卡死 | 短录音：已用时 + 预估区间；>2 小时切片后由 `note-transcription-progress` 给「第 N 块」进度。都不做百分比 |

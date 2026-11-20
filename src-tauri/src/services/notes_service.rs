@@ -1,8 +1,8 @@
 //! 笔记与笔记目录的持久化。
 //!
-//! 与历史模块共用 `db` 里的同一个数据库文件，但表与 schema 版本各自独立（版本记在
-//! `schema_meta` 的 `notes` 行）。共用文件是为了拿到跨模块的事务与外键：一次笔记转写要同时
-//! 写历史行和笔记 transcript，「历史 → 存为笔记」要读一侧写另一侧，拆成两个文件时这两处
+//! 与历史模块同在 `db` 的数据库文件里，但表与 schema 版本各自独立（版本记在
+//! `schema_meta` 的 `notes` 行）。同库是为了拿到跨模块的事务与外键：一次笔记转写要同时
+//! 写历史行和笔记 transcript，「历史 → 存为笔记」要读一侧写另一侧，分开存时这两处
 //! 既不能回滚也不能约束引用。
 //!
 //! `notes.history_id` 与 `note_recordings.history_id` 都指向 `transcription_history(id)`，
@@ -1344,7 +1344,7 @@ pub async fn delete_note_recording(id: i64) -> Result<Option<(i64, String)>, Str
 
 /// 笔记转写的落库：写历史行 + 写回该段转录，同一个事务。
 ///
-/// 之前这两步各开一条连接，转写期间笔记被删就会在历史里留下一条没人认领的行。
+/// 同事务的理由：转写期间笔记被删的话，历史行不能留下来当孤儿。
 /// `reuse_history` 有值时**就地更新**那条历史（重新转写不堆重复记录），没有才新插。
 /// 保留期清理放在提交之后：它自己要开写事务，塞进本事务会嵌套。
 pub async fn save_recording_transcription(
@@ -1460,9 +1460,9 @@ fn derive_title(text: &str) -> String {
 
 /// 「历史记录 → 笔记」：读历史、查重、建笔记、写转录在同一个事务里。
 ///
-/// 两件事必须一起成立：历史行是笔记的引用来源，笔记是历史文本的落地。之前读历史
-/// 与写笔记各开一条连接，保留期 GC 正好插在中间时笔记会带着一个已消失的
-/// `history_id` 落库，或者反过来在历史里留下没人认领的行。
+/// 同事务的理由：历史行是笔记的引用来源，笔记是历史文本的落地。保留期 GC 插在
+/// 读与写之间时，笔记会带着一个已消失的 `history_id` 落库，或者反过来在历史里
+/// 留下没人认领的行。
 pub async fn create_note_from_history(
     history_id: i64,
     folder_id: Option<i64>,
@@ -2040,7 +2040,7 @@ mod tests {
         assert_eq!(version, NOTES_SCHEMA_VERSION);
     }
 
-    /// 合并成一个库之后，历史行被淘汰只应断开笔记侧的引用。
+    /// 历史行被淘汰只应断开笔记侧的引用。
     #[test]
     fn deleting_history_row_only_clears_the_note_reference() {
         let connection = Connection::open_in_memory().unwrap();

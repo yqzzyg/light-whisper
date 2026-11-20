@@ -2031,7 +2031,7 @@
         "src-tauri/src/state/app_state.rs#a_second_transcription_is_rejected_while_one_runs",
         "src-tauri/src/services/transcription_service.rs#local_engines_are_everything_but_the_two_online_ones"
       ],
-      "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. Notes and history now share one database file but keep separate tables: notes_table never touches transcription_history rows or the history audio GC/lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. Cross-module writes (history row + recording transcript, history read + note insert) are single transactions in Rust, which is why this model keeps the note and history sides independent. The model bounds one folder and two notes; it is not a refinement of the Rust source."
+      "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. Notes and history share one database file but keep separate tables: notes_table never touches transcription_history rows or the history audio GC/lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. Cross-module writes (history row + recording transcript, history read + note insert) are single transactions in Rust, which is why this model keeps the note and history sides independent. The model bounds one folder and two notes; it is not a refinement of the Rust source."
     }
   },
   "runs": {
