@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   transcribeNoteRecording,
@@ -22,14 +23,24 @@ export interface NoteTranscriptionError {
   message: string;
 }
 
+/** 超长录音被后端切成多块转写时的进度；短录音整段转，永远是 `null`。 */
+export interface NoteTranscriptionChunk {
+  /** 已开始转写到第几块（从 1 开始）。 */
+  done: number;
+  /** 后端估算的总块数，仅用于参考，实际块数可能因静音吸附略有出入。 */
+  total: number;
+}
+
 export interface NoteTranscriptionState {
   /** 正在转写的笔记；空闲时为 `null`。 */
   noteId: number | null;
   /** 正在转写的录音段；整篇转录或空闲时为 `null`。 */
   recordingId: number | null;
   running: boolean;
-  /** 从开始到现在过了多少秒，由本地计时器推进（后端没有进度事件）。 */
+  /** 从开始到现在过了多少秒，由本地计时器推进。 */
   elapsedSec: number;
+  /** 分块转写进度；整段转写（未切片）或空闲时为 `null`。 */
+  chunk: NoteTranscriptionChunk | null;
   /** 上一次失败；留在状态里，切回来还能看到原因与重试入口。 */
   error: NoteTranscriptionError | null;
 }
@@ -39,6 +50,7 @@ const IDLE: NoteTranscriptionState = {
   recordingId: null,
   running: false,
   elapsedSec: 0,
+  chunk: null,
   error: null,
 };
 
@@ -51,6 +63,46 @@ const listeners = new Set<() => void>();
 
 let startedAt = 0;
 let ticker: ReturnType<typeof setInterval> | null = null;
+
+interface TranscriptionProgressPayload {
+  noteId: number;
+  recordingId: number;
+  chunk: number;
+  chunkTotal: number;
+}
+
+let progressUnsubscribe: UnlistenFn | null = null;
+let progressSubscribing = false;
+let progressSubscribeFailed = false;
+
+/**
+ * 订阅切片转写进度（只订阅一次）。
+ *
+ * 与 `noteSummaryStore` 同样的懒订阅：测试环境没有 Tauri IPC，模块顶层 `listen`
+ * 会直接抛错。`progressUnsubscribe` 才是「已订阅」标志——只判 in-flight 标志的话，
+ * 页面反复挂载会重复注册监听。
+ */
+async function ensureProgressSubscribed(): Promise<void> {
+  if (progressUnsubscribe || progressSubscribing || progressSubscribeFailed) return;
+  progressSubscribing = true;
+  try {
+    progressUnsubscribe = await listen<TranscriptionProgressPayload>(
+      "note-transcription-progress",
+      (event) => {
+        const payload = event.payload;
+        if (!payload || !state.running || state.noteId === null) return;
+        // 只认当前这篇：切走时另一篇的块进度不该显示在这里。
+        if (payload.noteId !== state.noteId) return;
+        emit({ chunk: { done: payload.chunk, total: payload.chunkTotal } });
+      },
+    );
+  } catch {
+    // 订阅失败不影响转写本身，只是没有分块进度可显示。
+    progressSubscribeFailed = true;
+  } finally {
+    progressSubscribing = false;
+  }
+}
 
 function emit(patch: Partial<NoteTranscriptionState>) {
   state = { ...state, ...patch };
@@ -129,7 +181,8 @@ async function runTranscription(
 
   startedAt = Date.now();
   stopTicker();
-  emit({ noteId, recordingId, running: true, elapsedSec: 0, error: null });
+  emit({ noteId, recordingId, running: true, elapsedSec: 0, chunk: null, error: null });
+  void ensureProgressSubscribed();
   ticker = setInterval(() => {
     emit({ elapsedSec: Math.floor((Date.now() - startedAt) / 1000) });
   }, 1000);
@@ -146,7 +199,13 @@ async function runTranscription(
     return message;
   } finally {
     stopTicker();
-    emit({ noteId: null, recordingId: null, running: false, elapsedSec: 0 });
+    emit({
+      noteId: null,
+      recordingId: null,
+      running: false,
+      elapsedSec: 0,
+      chunk: null,
+    });
   }
 }
 
@@ -154,6 +213,10 @@ async function runTranscription(
 export function resetNoteTranscriptionForTests() {
   stopTicker();
   startedAt = 0;
+  progressUnsubscribe?.();
+  progressUnsubscribe = null;
+  progressSubscribing = false;
+  progressSubscribeFailed = false;
   state = IDLE;
   for (const listener of listeners) listener();
 }

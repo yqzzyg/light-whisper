@@ -129,6 +129,7 @@ const en: TranslationSchema = {
     transcribeBusy: "Another note is being transcribed",
     transcribeHint: "About {{estimate}} — you can leave this page",
     transcribing: "Transcribing · {{elapsed}} elapsed",
+    transcribingChunk: "Transcribing · block {{chunk}} · {{elapsed}} elapsed",
     transcribeEstimate: "About {{estimate}}",
     transcribeCanLeave: "You can leave — the text is written back when it finishes",
     transcribeDone: "Transcription finished",

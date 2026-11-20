@@ -121,6 +121,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NoteEditor>> = {})
       recordingId: null,
       running: false,
       elapsedSec: 0,
+      chunk: null,
       error: null,
     },
     onStartRecording: vi.fn(),
@@ -242,7 +243,14 @@ describe("NoteEditor", () => {
     setup({
       note: detail({ transcript: null, durationSec: 95 }),
       recordings: [recording()],
-      transcription: { noteId: 1, recordingId: null, running: true, elapsedSec: 42, error: null },
+      transcription: {
+        noteId: 1,
+        recordingId: null,
+        running: true,
+        elapsedSec: 42,
+        chunk: null,
+        error: null,
+      },
     });
     fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
 
@@ -250,11 +258,38 @@ describe("NoteEditor", () => {
     expect(screen.queryByRole("button", { name: /notes\.transcribe$/ })).toBeNull();
   });
 
+  it("shows which chunk is running for a sliced long recording", () => {
+    setup({
+      note: detail({ transcript: null, durationSec: 3 * 60 * 60 }),
+      recordings: [recording()],
+      transcription: {
+        noteId: 1,
+        recordingId: null,
+        running: true,
+        elapsedSec: 200,
+        chunk: { done: 3, total: 6 },
+        error: null,
+      },
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    // 有块进度时用带块号的那句，别再显示笼统的「已用 N 秒」。
+    expect(screen.getByText("notes.transcribingChunk")).toBeTruthy();
+    expect(screen.queryByText("notes.transcribing")).toBeNull();
+  });
+
   it("keeps the transcribe button disabled while another note is running", () => {
     setup({
       note: detail({ transcript: null, durationSec: 95 }),
       recordings: [recording()],
-      transcription: { noteId: 99, recordingId: null, running: true, elapsedSec: 5, error: null },
+      transcription: {
+        noteId: 99,
+        recordingId: null,
+        running: true,
+        elapsedSec: 5,
+        chunk: null,
+        error: null,
+      },
     });
     fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
 
@@ -271,6 +306,7 @@ describe("NoteEditor", () => {
         recordingId: null,
         running: false,
         elapsedSec: 0,
+        chunk: null,
         error: { noteId: 1, message: "引擎未就绪" },
       },
     });
@@ -517,6 +553,7 @@ describe("NoteEditor", () => {
         recordingId: null,
         running: true,
         elapsedSec: 1,
+        chunk: null,
         error: null,
       },
     });
@@ -540,6 +577,7 @@ describe("NoteEditor", () => {
         recordingId: 7,
         running: true,
         elapsedSec: 1,
+        chunk: null,
         error: null,
       },
     });

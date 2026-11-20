@@ -12,6 +12,19 @@ const notes = vi.hoisted(() => ({
 }));
 vi.mock("@/hooks/notesStore", () => notes);
 
+type ProgressHandler = (event: { payload: unknown }) => void;
+const events = vi.hoisted(() => {
+  const handlers: ProgressHandler[] = [];
+  return {
+    handlers,
+    listen: vi.fn(async (_name: string, handler: ProgressHandler) => {
+      handlers.push(handler);
+      return () => {};
+    }),
+  };
+});
+vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
+
 import {
   estimateTranscribeSeconds,
   getNoteTranscriptionSnapshot,
@@ -45,6 +58,8 @@ function detail(overrides: Partial<NoteDetail> = {}): NoteDetail {
 
 beforeEach(() => {
   resetNoteTranscriptionForTests();
+  events.handlers.length = 0;
+  events.listen.mockClear();
   api.transcribeNoteRecording.mockReset();
   api.transcribeNoteRecordingSegment.mockReset();
   notes.refreshNotes.mockClear();
@@ -151,5 +166,40 @@ describe("noteTranscriptionStore", () => {
     expect(estimateTranscribeSeconds(null)).toBeNull();
     expect(estimateTranscribeSeconds(0)).toBeNull();
     expect(estimateTranscribeSeconds(Number.NaN)).toBeNull();
+  });
+
+  it("tracks chunk progress for a long recording and clears it when done", async () => {
+    let release = () => {};
+    api.transcribeNoteRecording.mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    const pending = transcribeNote(1);
+    await vi.waitFor(() => expect(getNoteTranscriptionSnapshot().running).toBe(true));
+    await vi.waitFor(() => expect(events.handlers).toHaveLength(1));
+
+    // 另一篇的块进度不该显示在这里。
+    events.handlers[0]({ payload: { noteId: 2, recordingId: 9, chunk: 1, chunkTotal: 6 } });
+    expect(getNoteTranscriptionSnapshot().chunk).toBeNull();
+
+    events.handlers[0]({ payload: { noteId: 1, recordingId: 5, chunk: 3, chunkTotal: 6 } });
+    expect(getNoteTranscriptionSnapshot().chunk).toEqual({ done: 3, total: 6 });
+
+    release();
+    await pending;
+    // 转写结束后不能把上一轮的块进度留在状态里。
+    expect(getNoteTranscriptionSnapshot().chunk).toBeNull();
+  });
+
+  it("subscribes to the progress event only once across runs", async () => {
+    api.transcribeNoteRecording.mockResolvedValue(detail());
+
+    await transcribeNote(1);
+    await transcribeNote(1);
+
+    // 重复挂载页面时多注册一个监听，会让块进度被重复处理。
+    expect(events.listen).toHaveBeenCalledTimes(1);
   });
 });

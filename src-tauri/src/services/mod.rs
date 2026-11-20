@@ -1,6 +1,7 @@
 pub mod ai_polish_service;
 pub mod alibaba_asr_service;
 pub mod assistant_service;
+pub mod audio_chunk_service;
 pub mod audio_import_service;
 pub mod audio_service;
 pub mod codex_oauth_service;

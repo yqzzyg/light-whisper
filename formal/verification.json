@@ -604,6 +604,9 @@
     "note-summary-status": [
       "notes"
     ],
+    "note-transcription-progress": [
+      "notes"
+    ],
     "hotkey-diagnostic": [
       "hotkeys"
     ],
@@ -1980,7 +1983,7 @@
       "assumptions": "Two contexts and two abstract K/vocabulary keys; four-column requests only, two calls per context for policy and three across at most two lifetimes for restart. One eligible application head per backend context; serialized synchronous application commands and idle-lock exclusion. Actual stock-kernel/device/layout guards narrow eligibility. Other column counts retain their actual scalar shape outside this model. Calibration effects/ticks are conservative abstract observations; native parity rejection skips timing. First-input parity is not all-input arithmetic proof. No compiler/driver refinement, unrestricted concurrent C ABI calls, universal GPU validation or performance proof."
     },
     "notes": {
-      "obligation": "Notes and note folders persist in an independent SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes. Creating a note from a history record copies its transcript, duration and history id, never the audio, and stays idempotent per history record so repeated clicks yield one note. Meeting recording appends 16 kHz mono PCM to a placeholder-headed WAV at least twice a second, so a long session survives a crash with at most one flush interval lost; the header is backfilled on stop and repaired on the next startup before unreferenced files are removed. Only one recording session exists at a time, it refuses to start while dictation holds the microphone, and every recording file is deleted together with its note. A note holds several recordings: each start/stop appends a new WAV as a separate segment, and the v1 single-audio column migrates into one segment. Transcribing walks only the segments with an empty transcript, hands each stored file path to the engine without copying the audio, writes one history record per segment that carries no audio reference, and joins segment transcripts into the note transcript. Repeated clicks skip already transcribed segments, and a second concurrent transcription is refused instead of running the engine twice. A single segment can be re-transcribed on demand even when it already has a transcript, appending a new history record without removing the old one and still sharing the per-note concurrency guard. Playing a segment grants asset-protocol access to that one verified file at runtime rather than opening the whole audio directory.",
+      "obligation": "Notes and note folders persist in an independent SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes. Creating a note from a history record copies its transcript, duration and history id, never the audio, and stays idempotent per history record so repeated clicks yield one note. Meeting recording appends 16 kHz mono PCM to a placeholder-headed WAV at least twice a second, so a long session survives a crash with at most one flush interval lost; the header is backfilled on stop and repaired on the next startup before unreferenced files are removed. Only one recording session exists at a time, it refuses to start while dictation holds the microphone, and every recording file is deleted together with its note. A note holds several recordings: each start/stop appends a new WAV as a separate segment, and the v1 single-audio column migrates into one segment. Transcribing walks only the segments with an empty transcript, hands each stored file path to the engine without copying the audio, writes one history record per segment that carries no audio reference, and joins segment transcripts into the note transcript. Repeated clicks skip already transcribed segments, and a second concurrent transcription is refused instead of running the engine twice. A single segment can be re-transcribed on demand even when it already has a transcript, appending a new history record without removing the old one and still sharing the per-note concurrency guard. Playing a segment grants asset-protocol access to that one verified file at runtime rather than opening the whole audio directory. A stored recording longer than two hours is transcribed in thirty-minute chunks streamed from the same file without copying the audio; each chunk is handed to the engine as raw PCM and the chunk texts are joined with blank lines into the one segment transcript, so the user still sees a single segment and a single history record. A cut lands in the quietest window near the target offset, and a failed chunk fails the whole segment instead of storing a partial transcript.",
       "models": {
         "HistoryRecords": [
           "DeleteTransactionIsAtomic"
@@ -1992,6 +1995,7 @@
         "src-tauri/src/services/note_recording_service.rs",
         "src-tauri/src/services/wav_writer.rs",
         "src-tauri/src/services/transcription_service.rs",
+        "src-tauri/src/services/audio_chunk_service.rs",
         "src-tauri/src/commands/note_transcription.rs"
       ],
       "evidence": [
@@ -2012,6 +2016,9 @@
         "src-tauri/src/services/notes_service.rs#recordings_are_appended_and_recomputed_into_the_note",
         "src-tauri/src/services/notes_service.rs#migration_v1_to_v2_moves_the_single_audio_into_a_recording",
         "src-tauri/src/commands/note_transcription.rs#note_history_keeps_the_audio_out_of_the_history_table",
+        "src-tauri/src/services/audio_chunk_service.rs#chunker_splits_into_contiguous_blocks_without_losing_samples",
+        "src-tauri/src/services/audio_chunk_service.rs#silence_snapping_moves_the_cut_into_the_quiet_gap",
+        "src-tauri/src/services/audio_chunk_service.rs#joined_transcripts_skip_blank_parts_and_use_blank_lines",
         "src-tauri/src/state/app_state.rs#a_second_transcription_is_rejected_while_one_runs",
         "src-tauri/src/services/transcription_service.rs#local_engines_are_everything_but_the_two_online_ones"
       ],

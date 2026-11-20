@@ -127,6 +127,7 @@ const zh = {
     transcribeBusy: "已有另一篇笔记正在转写",
     transcribeHint: "预计约 {{estimate}}，期间可以切走",
     transcribing: "转写中 · 已用 {{elapsed}}",
+    transcribingChunk: "转写中 · 第 {{chunk}} 块 · 已用 {{elapsed}}",
     transcribeEstimate: "预计约 {{estimate}}",
     transcribeCanLeave: "可以切走，完成后自动写回这篇笔记",
     transcribeDone: "转写完成",

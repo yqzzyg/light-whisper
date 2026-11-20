@@ -9,13 +9,19 @@
 //! - **一次一条**：`AppState::note_transcription` 挡住连点造成的并发转写。
 //! - **失败不落历史**：转写失败的段不写历史；之前成功的段保留，重试只补没转的。
 
+use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::Emitter;
 
+use crate::services::audio_chunk_service::{self, WavChunker, CHUNK_SECS};
+use crate::services::funasr_service::{self, TranscriptionResult};
 use crate::services::{history_service, notes_service, transcription_service};
 use crate::state::AppState;
 use crate::utils::{paths, AppError};
+
+/// 切片转写的进度事件，前端只用它显示「正在转写第 N 块」。
+const NOTE_TRANSCRIPTION_PROGRESS_EVENT: &str = "note-transcription-progress";
 
 fn now_millis_u64() -> u64 {
     SystemTime::now()
@@ -99,15 +105,7 @@ impl TranscribeRun<'_> {
         }
 
         let asr_started = Instant::now();
-        let result = transcription_service::transcribe_file(
-            self.app,
-            self.state,
-            &path,
-            recording.duration_sec,
-            error_prefix,
-        )
-        .await
-        .map_err(AppError::Asr)?;
+        let result = self.run_asr(&path, recording, error_prefix).await?;
         let asr_ms = Some(elapsed_ms(asr_started));
 
         let text = result.text.trim().to_string();
@@ -138,6 +136,104 @@ impl TranscribeRun<'_> {
             .app
             .emit("history-updated", serde_json::json!({ "id": history_id }));
         Ok(())
+    }
+
+    /// 一次 ASR 调用：超长录音走切片，其余沿用整段转写。
+    ///
+    /// 切片只在本地引擎下生效——在线引擎有硬性的时长/大小上限，`transcribe_file`
+    /// 会先给出明确拦截文案，拿不到可供切分的时长预算。
+    async fn run_asr(
+        &self,
+        path: &Path,
+        recording: &notes_service::NoteRecording,
+        error_prefix: &str,
+    ) -> Result<TranscriptionResult, AppError> {
+        if audio_chunk_service::should_chunk(recording.duration_sec)
+            && transcription_service::is_local_engine(&self.engine)
+        {
+            return self
+                .transcribe_in_chunks(path, recording, error_prefix)
+                .await;
+        }
+
+        transcription_service::transcribe_file(
+            self.app,
+            self.state,
+            path,
+            recording.duration_sec,
+            error_prefix,
+        )
+        .await
+        .map_err(AppError::Asr)
+    }
+
+    /// 把一段长录音按 30 分钟切开，逐块转写后拼成一段文本。
+    ///
+    /// 切的是「这一段的音频数据」，不新增 `note_recordings`、不多写历史：
+    /// 用户看到的仍是一段录音、一段转录。中间任何一块失败都返回错误，整段
+    /// 结果不落库（重试从头开始）——半截转录比没有更糟，用户会以为录丢了。
+    async fn transcribe_in_chunks(
+        &self,
+        path: &Path,
+        recording: &notes_service::NoteRecording,
+        error_prefix: &str,
+    ) -> Result<TranscriptionResult, AppError> {
+        let mut chunker = WavChunker::open(path, CHUNK_SECS)
+            .map_err(|error| AppError::Asr(format!("{error_prefix}：{error}")))?;
+        let sample_rate = chunker.sample_rate();
+        // 只用于进度文案；静音吸附会让实际块数略有出入，别拿它当循环上界。
+        let estimated = audio_chunk_service::chunk_count(recording.duration_sec.unwrap_or(0.0));
+
+        let mut parts: Vec<String> = Vec::new();
+        let mut language: Option<String> = None;
+        let mut index = 0usize;
+
+        while let Some(samples) = chunker
+            .next_chunk()
+            .map_err(|error| AppError::Asr(format!("{error_prefix}：{error}")))?
+        {
+            index += 1;
+            let _ = self.app.emit(
+                NOTE_TRANSCRIPTION_PROGRESS_EVENT,
+                serde_json::json!({
+                    "noteId": recording.note_id,
+                    "recordingId": recording.id,
+                    "chunk": index,
+                    "chunkTotal": estimated,
+                }),
+            );
+
+            let result =
+                funasr_service::transcribe_pcm16(self.state, &samples, sample_rate, self.app)
+                    .await
+                    .map_err(|error| {
+                        AppError::Asr(format!("{error_prefix}：第 {index} 块转写失败：{error}"))
+                    })?;
+            if !result.success {
+                let reason = result.error.unwrap_or_else(|| "未知错误".into());
+                return Err(AppError::Asr(format!(
+                    "{error_prefix}：第 {index} 块转写失败：{reason}"
+                )));
+            }
+            if language.is_none() {
+                language = result.language.filter(|value| !value.trim().is_empty());
+            }
+            parts.push(result.text);
+        }
+
+        if parts.is_empty() {
+            return Err(AppError::Asr(format!(
+                "{error_prefix}：录音文件里没有可用的音频数据"
+            )));
+        }
+
+        Ok(TranscriptionResult {
+            text: audio_chunk_service::join_transcripts(&parts),
+            duration: recording.duration_sec,
+            success: true,
+            error: None,
+            language,
+        })
     }
 }
 

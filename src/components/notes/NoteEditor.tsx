@@ -421,9 +421,14 @@ export default function NoteEditor({
                 <p className="notes-transcribe-status" role="status">
                   <LoaderCircle size={12} className="animate-spin" />
                   <span>
-                    {t("notes.transcribing", {
-                      elapsed: formatDuration(transcription.elapsedSec),
-                    })}
+                    {transcription.chunk
+                      ? t("notes.transcribingChunk", {
+                          chunk: transcription.chunk.done,
+                          elapsed: formatDuration(transcription.elapsedSec),
+                        })
+                      : t("notes.transcribing", {
+                          elapsed: formatDuration(transcription.elapsedSec),
+                        })}
                   </span>
                   {estimate !== null && (
                     <span className="notes-transcribe-estimate">
