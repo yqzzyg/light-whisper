@@ -35,7 +35,7 @@
 - 笔记侧 `history_id` 都是真外键 `REFERENCES transcription_history(id) ON DELETE SET NULL`：历史被保留期淘汰只断引用，笔记不受影响；删笔记不删历史（审计日志）。
 - **跨模块写必须一个事务**：`notes_service::create_note_from_history`（读历史 + 建笔记）与 `notes_service::save_recording_transcription`（写历史 + 写段转录）都是单个 `IMMEDIATE` 事务。命令层不要再「先 `history_service::get` 再 `notes_service::xxx`」，那样中间能被保留期 GC 插进来。保留期清理（`history_service::cleanup_expired_with_connection`）自己开写事务，只能放在提交之后。
 - `notes.audio_file` 已在 schema v3 删除（v2 起由 `note_recordings` 取代），`NoteDetail.audioFile` 同步移除；`notes(history_id)` 有唯一索引，一条历史只能转出一篇笔记。
-- 音频目录两套、生命周期不同：`history_audio/`（历史，有租约与 GC）与 `notes_audio/`（笔记，按 note.audio_file 引用回收）。路径解析一律走 `paths::safe_file_in_dir`。
+- 音频目录两套、生命周期不同：`history_audio/`（历史，有租约与 GC）与 `notes_audio/`（笔记，按 `note_recordings.audio_file` 引用回收）。路径解析一律走 `paths::safe_file_in_dir`。
 - 会议录音（`note_recording_service`）只落盘不转写，落盘间隔 500ms；录音期间**不应出现 ASR 子进程**，这是「先录后转省电」的验收点。
 - 会议录音与听写共用麦克风，互斥只做单向（会议录音开始前查听写），不要在听写热键链路里加反向检查。
 
@@ -43,7 +43,7 @@
 
 - 所有 ASR 分派只走 `services/transcription_service.rs`：`transcribe_wav_bytes`（内存）、`transcribe_file`（磁盘路径）。命令层不要再自己 match 引擎。
 - 笔记转写**必须直传路径**（`funasr_service::transcribe_path`），不要为了复用 `transcribe` 把一小时 WAV 读进内存再写临时文件。
-- 幂等规则：`transcribe_note_recording` 发现 `notes.transcript` 非空即原样返回；**转写失败不写历史**（成功才 insert），所以重试永远只有一条历史行。
+- 幂等规则：`transcribe_note_recording` 默认只转 `transcript` 为空的段；**转写失败不写历史**（成功才 insert），所以重试永远只有一条历史行。`force=true` 是「重新转写」，会覆盖已有转录并**就地更新**该段原来的历史行（不追加重复记录）。
 - 历史行的 `mode="note"` 且 `audio_file=NULL`：音频归笔记，写进历史会让历史 GC 删掉笔记唯一的录音。
 - 并发保护是后端 `AppState.note_transcription` 原子占位，不要只靠前端按钮 `disabled`。
-- 「重新转写」（已有转录重跑）与「历史 → 笔记跳转」都留到 P5，别在幂等分支上临时开口子。
+- 「重新转写」与「历史 → 笔记跳转」已在 P5 落地：`transcribe_note_recording(note_id, force)`、`find_note_by_history` / `find_notes_by_history`（批量，列表渲染用）。反查要查两条路径：`notes.history_id` 与 `note_recordings.history_id`。

@@ -125,8 +125,9 @@ pub fn run() {
                 });
             }
 
-            // 笔记录音目录的清理由笔记库决定归属，必须等笔记库就绪后再跑：
-            // 先补写崩溃留下的半截 WAV 头，再删掉没有任何笔记引用的文件。
+            // 笔记录音目录的归属由笔记模块决定（引用集合来自 notes 表），
+            // 必须等笔记侧就绪后再跑：先补写崩溃留下的半截 WAV 头，
+            // 再删掉没有任何笔记引用的文件。
             {
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = services::note_recording_service::cleanup_startup().await {

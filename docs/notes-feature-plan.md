@@ -455,7 +455,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 追加（2026-11-19）：一条笔记保留多段录音
 
 - 用户确认产品语义：同一条笔记再次录音**不覆盖**，而是新增一段。原设计的 `notes.audio_file` 单槽会在第二次 stop 时把旧段变孤儿，且 `transcript` 非空导致新段永远不会被转写。
-- schema 升到 `user_version=2`：新增 `note_recordings`（note_id / audio_file / duration_sec / transcript / history_id / sort_order / created_at）。迁移在同一 IMMEDIATE 事务里把老 `notes.audio_file` 非空的行灌成一段，再置空旧列；之后 `notes` 不再持有音频引用。
+- schema 升到 `user_version=2`：新增 `note_recordings`（note_id / audio_file / duration_sec / transcript / history_id / sort_order / created_at）。迁移在同一 IMMEDIATE 事务里把老 `notes.audio_file` 非空的行灌成一段，再置空旧列；之后 `notes` 不再持有音频引用。（此处 `user_version` 是 2026-11-19 当时的机制，已在 2026-11-20 换成 `schema_meta(module, version)`；`notes.audio_file` 也已在 schema v3 删除。）
 - 每次 start/stop 追加一段；删笔记返回**所有**段文件名交给录音侧清理；启动孤儿清理的引用集合改读段表；删除单段时删文件并重算聚合。
 - 「转文字」改为**段级幂等**：只转 `transcript` 为空的段，每段一条 `history(mode="note", audio_file=NULL)`，成功后写段转录；最后把段转录按 `\n\n` 拼回 `notes.transcript`、时长求和。中途失败保留已成功段，重试只补未转的；并发仍由 `AppState.note_transcription` 按笔记 ID 挡。
 - 笔记页转录 tab 增加分段列表（序号 / 时长 / 状态 / 在文件夹中显示 / 删除段），解决「转录后找不到录音文件」——文件一直在 `notes_audio/`，只是原先界面没有任何入口。P2 历史转存来的笔记没有段，继续显示「录音在历史记录中」。

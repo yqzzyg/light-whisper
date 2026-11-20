@@ -138,7 +138,10 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
     )
 }
 
-/// 幂等初始化。所有对外函数都先调它，与历史库保持同一范式。
+/// 幂等初始化。所有对外函数都先调它，与历史模块保持同一范式。
+///
+/// 只跑 `migrate_schema`（含历史侧的建表），**不**跑 `history_service::initialize`：
+/// 后者还会清租约与孤儿历史音频，那是历史模块自己的启动清理，由 `lib.rs` 单独触发。
 pub async fn initialize() -> Result<(), String> {
     NOTES_INITIALIZED
         .get_or_try_init(|| async {
