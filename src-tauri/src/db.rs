@@ -24,6 +24,10 @@ use crate::utils::paths;
 
 const DB_FILE: &str = "minutes.sqlite3";
 
+/// 早期版本的历史库与笔记库文件名。合并成单文件后它们是没人读的孤儿，
+/// 启动时删掉，免得一直躺在数据目录里占地方、还让人以为数据在那儿。
+const LEGACY_DB_FILES: [&str; 2] = ["transcription_history.sqlite3", "notes.sqlite3"];
+
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn migration_lock() -> &'static Mutex<()> {
@@ -50,6 +54,28 @@ pub fn open() -> Result<Connection, String> {
     let connection = Connection::open(&path).map_err(|error| format!("打开数据库失败: {error}"))?;
     configure(&connection)?;
     Ok(connection)
+}
+
+/// 删掉早期版本留下的独立库文件。
+///
+/// 合并到单文件后这两个文件里的表已经在当前库中，文件本身没人读。删不删都不影响
+/// 功能，但留着会让用户以为数据还在那儿，也白占磁盘。删失败只记日志，不挡启动。
+pub fn cleanup_legacy_databases() {
+    cleanup_legacy_databases_in(&paths::get_data_dir());
+}
+
+/// [`cleanup_legacy_databases`] 的可测版本：目录由调用方给，测试用临时目录。
+fn cleanup_legacy_databases_in(directory: &std::path::Path) {
+    for name in LEGACY_DB_FILES {
+        let path = directory.join(name);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => log::info!("清理旧版数据库文件: {name}"),
+            Err(error) => log::warn!("清理旧版数据库文件失败 {}: {error}", path.display()),
+        }
+    }
 }
 
 /// 运行时连接配置，对内存库同样适用，便于测试复用。
@@ -141,6 +167,53 @@ mod tests {
         let connection = Connection::open_in_memory().expect("open in-memory database");
         configure(&connection).expect("configure in-memory database");
         connection
+    }
+
+    /// 造一个一次性临时目录。数据目录是全局 `OnceLock`，测试里改不动，
+    /// 所以要测文件清理只能自己给目录。
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "lw-db-test-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&directory).expect("create temp dir");
+        directory
+    }
+
+    #[test]
+    fn legacy_database_files_are_removed_and_current_one_is_kept() {
+        let directory = temp_dir("legacy-db-cleanup");
+        let current = directory.join(DB_FILE);
+        let legacy: Vec<_> = LEGACY_DB_FILES
+            .iter()
+            .map(|name| directory.join(name))
+            .collect();
+        for path in legacy.iter().chain(std::iter::once(&current)) {
+            std::fs::write(&path, b"placeholder").expect("seed db file");
+        }
+
+        cleanup_legacy_databases_in(&directory);
+
+        assert!(current.exists(), "当前库文件不能被删");
+        for path in &legacy {
+            assert!(!path.exists(), "旧库文件应被删除: {}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn cleanup_is_a_no_op_when_legacy_files_are_absent() {
+        let directory = temp_dir("legacy-db-noop");
+        // 不该 panic，也不该凭空造出文件。
+        cleanup_legacy_databases_in(&directory);
+        for name in LEGACY_DB_FILES {
+            assert!(!directory.join(name).exists());
+        }
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

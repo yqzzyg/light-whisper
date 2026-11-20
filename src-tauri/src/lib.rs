@@ -54,6 +54,9 @@ pub fn run() {
             let app_handle = app.handle().clone();
             log::info!("会听应用启动，数据目录: {:?}", utils::paths::get_data_dir());
 
+            // 清掉早期版本留下的独立库文件（合并成单文件后没人读它们了）。
+            db::cleanup_legacy_databases();
+
             // 启动时加载用户画像
             {
                 let state = app_handle.state::<AppState>();
