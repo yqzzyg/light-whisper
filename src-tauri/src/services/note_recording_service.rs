@@ -5,7 +5,7 @@
 //! - **不跑 ASR**：录音期间 CPU 应该接近空闲，这是「先录后转」省电的前提。
 //! - **边录边落盘**：每 `FLUSH_INTERVAL_MS` 把采集缓冲排空、重采样到 16k、追加进
 //!   WAV。进程被杀死最多丢一个 tick 的数据，而不是整场会议。
-//! - **只存文件名**：`notes.audio_file` 存的是 `notes_audio/` 下的单段文件名，
+//! - **只存文件名**：`note_recordings.audio_file` 存的是 `notes_audio/` 下的单段文件名，
 //!   目录与读取都经过 `paths::safe_file_in_dir`。
 //!
 //! 互斥：`AppState::note_capture` 保证同一时刻只有一个录音会话；开始前还会检查

@@ -10,7 +10,6 @@ use crate::utils::paths;
 
 const HISTORY_AUDIO_DIR: &str = "history_audio";
 const MAX_PAGE_SIZE: u32 = 200;
-const HISTORY_SCHEMA_VERSION: i64 = 2;
 
 static HISTORY_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
@@ -144,40 +143,20 @@ fn safe_audio_path(file_name: &str) -> Option<PathBuf> {
     paths::safe_file_in_dir(&history_audio_dir(), file_name)
 }
 
-/// 内存库测试用的组合配置。生产路径由 `db::open` 一次配好并迁移。
+/// 内存库测试用的组合配置。生产路径由 `db::open` 一次配好并建表。
 #[cfg(test)]
 fn configure_connection(connection: &Connection) -> Result<(), String> {
     db::configure(connection)?;
     migrate_schema(connection)
 }
 
-fn table_has_column(connection: &Connection, column_name: &str) -> Result<bool, String> {
-    let mut statement = connection
-        .prepare("PRAGMA table_info(transcription_history)")
-        .map_err(|error| format!("读取历史数据库结构失败: {error}"))?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|error| format!("查询历史数据库结构失败: {error}"))?;
-    for column in columns {
-        if column.map_err(|error| format!("解析历史数据库结构失败: {error}"))? == column_name
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// 建表并推进历史模块版本。`notes_service` 建 `notes` 表前要先调它：
+/// 建表。`notes_service` 建 `notes` 表前要先调它：
 /// 笔记侧的 `history_id` 外键指向 `transcription_history`，父表必须先在。
 pub(crate) fn migrate_schema(connection: &Connection) -> Result<(), String> {
-    db::migrate_module(
-        connection,
-        "history",
-        HISTORY_SCHEMA_VERSION,
-        |transaction, _current| {
-            transaction
-                .execute_batch(
-                    r#"
+    db::ensure_schema(connection, |transaction| {
+        transaction
+            .execute_batch(
+                r#"
             CREATE TABLE IF NOT EXISTS transcription_history (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id          INTEGER NOT NULL,
@@ -200,8 +179,6 @@ pub(crate) fn migrate_schema(connection: &Connection) -> Result<(), String> {
                 asr_ms              INTEGER,
                 polish_ms           INTEGER,
                 total_ms            INTEGER,
-                -- Retained only so databases remain compatible with older app versions.
-                raw_first_status    TEXT,
                 error               TEXT,
                 reprocessed_from_id INTEGER,
                 workflow            TEXT NOT NULL DEFAULT 'dictation'
@@ -218,34 +195,9 @@ pub(crate) fn migrate_schema(connection: &Connection) -> Result<(), String> {
                 updated_at INTEGER NOT NULL
             );
             "#,
-                )
-                .map_err(|error| format!("初始化历史数据库失败: {error}"))?;
-
-            if !table_has_column(transaction, "workflow")? {
-                transaction
-            .execute(
-                "ALTER TABLE transcription_history ADD COLUMN workflow TEXT NOT NULL DEFAULT 'dictation'",
-                [],
             )
-            .map_err(|error| format!("迁移历史处理类型失败: {error}"))?;
-            }
-            if !table_has_column(transaction, "source_text")? {
-                transaction
-                    .execute(
-                        "ALTER TABLE transcription_history ADD COLUMN source_text TEXT",
-                        [],
-                    )
-                    .map_err(|error| format!("迁移历史编辑原文失败: {error}"))?;
-            }
-            transaction
-        .execute(
-            "UPDATE transcription_history SET workflow = 'assistant' WHERE mode = 'assistant' AND workflow = 'dictation'",
-            [],
-        )
-        .map_err(|error| format!("迁移助手历史处理类型失败: {error}"))?;
-            Ok(())
-        },
-    )
+            .map_err(|error| format!("初始化历史数据库失败: {error}"))
+    })
 }
 
 pub async fn initialize() -> Result<(), String> {
@@ -988,7 +940,7 @@ mod tests {
     use super::{
         cleanup_expired_with_connection, configure_connection, get_for_reprocess_with_connection,
         latency_stats, map_stored_record, now_millis, release_audio_lease_with_connection,
-        safe_audio_path, table_has_column, HISTORY_COLUMNS, HISTORY_SCHEMA_VERSION,
+        safe_audio_path, HISTORY_COLUMNS,
     };
 
     include!("history_stats_tests.rs");
@@ -1049,11 +1001,11 @@ mod tests {
                     session_id, created_at, updated_at, mode, status, text, original_text, source_text,
                     duration_sec, language, engine, provider, model, app_process,
                     app_window_title, app_rule_name, audio_file, asr_ms, polish_ms,
-                    total_ms, raw_first_status, error, reprocessed_from_id
+                    total_ms, error, reprocessed_from_id
                 ) VALUES (
                     ?1, ?2, ?2, 'dictation', 'success', 'final text', 'raw text', 'selected text',
                     1.25, 'en', 'sensevoice', 'openai', 'gpt-test', 'Code.exe',
-                    'README - Code', 'Editor', NULL, 120, 240, 380, 'replaced', NULL, NULL
+                    'README - Code', 'Editor', NULL, 120, 240, 380, NULL, NULL
                 )
                 "#,
                 params![42_i64, created_at],
@@ -1328,63 +1280,34 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schema_migrates_assistant_workflow() {
-        let connection = Connection::open_in_memory().expect("open legacy history database");
-        connection
-            .execute_batch(
-                r#"
-                CREATE TABLE transcription_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    mode TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    original_text TEXT NOT NULL,
-                    duration_sec REAL,
-                    language TEXT,
-                    engine TEXT NOT NULL,
-                    provider TEXT,
-                    model TEXT,
-                    app_process TEXT,
-                    app_window_title TEXT,
-                    app_rule_name TEXT,
-                    audio_file TEXT,
-                    asr_ms INTEGER,
-                    polish_ms INTEGER,
-                    total_ms INTEGER,
-                    raw_first_status TEXT,
-                    error TEXT,
-                    reprocessed_from_id INTEGER
-                );
-                INSERT INTO transcription_history (
-                    session_id, created_at, updated_at, mode, status, text,
-                    original_text, engine
-                ) VALUES (1, 1, 1, 'assistant', 'success', 'answer', 'question', 'sensevoice');
-                "#,
-            )
-            .expect("create legacy schema");
+    fn schema_creation_is_idempotent_and_carries_every_column() {
+        let connection = Connection::open_in_memory().expect("open in-memory history database");
+        configure_connection(&connection).expect("create history schema");
+        configure_connection(&connection).expect("recreating the schema is idempotent");
 
-        configure_connection(&connection).expect("migrate legacy history schema");
-        configure_connection(&connection).expect("reopening an up-to-date schema is idempotent");
-        let workflow: String = connection
-            .query_row(
-                "SELECT workflow FROM transcription_history WHERE session_id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read migrated workflow");
-        assert_eq!(workflow, "assistant");
-        assert!(table_has_column(&connection, "source_text").expect("inspect source_text column"));
-        let schema_version: i64 = connection
-            .query_row(
-                "SELECT version FROM schema_meta WHERE module = 'history'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read migrated schema version");
-        assert_eq!(schema_version, HISTORY_SCHEMA_VERSION);
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(transcription_history)")
+            .expect("inspect columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read columns");
+        for expected in [
+            "workflow",
+            "source_text",
+            "reprocessed_from_id",
+            "error",
+            "audio_file",
+        ] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "建表后应有 {expected} 列，实际: {columns:?}"
+            );
+        }
+        assert!(
+            !columns.iter().any(|column| column == "raw_first_status"),
+            "raw_first_status 是死列，不该再建"
+        );
     }
 }
 

@@ -1,9 +1,8 @@
 //! 笔记与笔记目录的持久化。
 //!
-//! 与历史模块同在 `db` 的数据库文件里，但表与 schema 版本各自独立（版本记在
-//! `schema_meta` 的 `notes` 行）。同库是为了拿到跨模块的事务与外键：一次笔记转写要同时
-//! 写历史行和笔记 transcript，「历史 → 存为笔记」要读一侧写另一侧，分开存时这两处
-//! 既不能回滚也不能约束引用。
+//! 与历史模块同在 `db` 的数据库文件里，但表各自独立。同库是为了拿到跨模块的事务
+//! 与外键：一次笔记转写要同时写历史行和笔记 transcript，「历史 → 存为笔记」要读
+//! 一侧写另一侧，分开存时这两处既不能回滚也不能约束引用。
 //!
 //! `notes.history_id` 与 `note_recordings.history_id` 都指向 `transcription_history(id)`，
 //! `ON DELETE SET NULL`：历史被保留期淘汰时只断开引用，笔记本身不受影响。
@@ -27,7 +26,6 @@ use tokio::sync::OnceCell;
 use crate::db;
 use crate::services::history_service;
 
-const NOTES_SCHEMA_VERSION: i64 = 3;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
 /// 合法的笔记类型，与前端 `NoteKind` 一致。
@@ -47,15 +45,10 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
     // `notes` 与 `note_recordings` 的 `history_id` 是指向 `transcription_history` 的外键，
     // SQLite 建表时会校验父表存在，所以历史模块必须先建。两步各自开事务，不能嵌套。
     history_service::migrate_schema(connection)?;
-    db::migrate_module(
-        connection,
-        "notes",
-        NOTES_SCHEMA_VERSION,
-        |transaction, current| {
-            if current < 1 {
-                transaction
-                .execute_batch(
-                    r#"
+    db::ensure_schema(connection, |transaction| {
+        transaction
+            .execute_batch(
+                r#"
                 CREATE TABLE IF NOT EXISTS note_folders (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     name       TEXT    NOT NULL,
@@ -78,23 +71,15 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                     kind                 TEXT    NOT NULL DEFAULT 'personal',
                     duration_sec         REAL,
                     history_id           INTEGER REFERENCES transcription_history(id) ON DELETE SET NULL,
-                    audio_file           TEXT,  -- v1 的单槽录音，v3 删除
                     created_at           INTEGER NOT NULL,
                     updated_at           INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
-                "#,
-                )
-                .map_err(|error| format!("初始化笔记数据库失败: {error}"))?;
-            }
-            if current < 2 {
-                // 一条笔记允许多段录音：每段独立存文件、转录与历史引用。
-                // 老数据里 notes.audio_file 是单槽，原样灌成一段；灌完置 NULL，
-                // 之后 notes 不再持有音频引用，避免两个事实源漂移。
-                transaction
-                .execute_batch(
-                    r#"
+                -- 一条历史只能转出一篇笔记。应用层已经查重，这里让引擎也守住，
+                -- 避免并发连点漏出两条。
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_history
+                    ON notes(history_id) WHERE history_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS note_recordings (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
                     note_id      INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -107,35 +92,10 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_note_recordings_note
                     ON note_recordings(note_id, sort_order, id);
-                INSERT INTO note_recordings
-                    (note_id, audio_file, duration_sec, transcript, history_id, sort_order, created_at)
-                SELECT id, audio_file, duration_sec, transcript, history_id, 0, created_at
-                    FROM notes WHERE audio_file IS NOT NULL AND audio_file <> '';
-                UPDATE notes SET audio_file = NULL WHERE audio_file IS NOT NULL;
                 "#,
-                )
-                .map_err(|error| format!("升级笔记数据库到多段录音失败: {error}"))?;
-            }
-            if current < 3 {
-                // v2 起 `notes.audio_file` 就被 `note_recordings` 取代，迁移时已置 NULL，
-                // 之后再没有任何写入。留着这一列只会让人误以为笔记还有第二个音频事实源，
-                // 对应的 `NoteDetail.audioFile` 也恒为 null——一并删掉。
-                //
-                // 顺手补一条唯一索引：一条历史只能转出一篇笔记。应用层已经有查重，
-                // 这里让引擎也守住，避免并发连点漏出两条。
-                transaction
-                    .execute_batch(
-                        r#"
-                ALTER TABLE notes DROP COLUMN audio_file;
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_history
-                    ON notes(history_id) WHERE history_id IS NOT NULL;
-                "#,
-                    )
-                    .map_err(|error| format!("清理笔记音频列失败: {error}"))?;
-            }
-            Ok(())
-        },
-    )
+            )
+            .map_err(|error| format!("初始化笔记数据库失败: {error}"))
+    })
 }
 
 /// 幂等初始化。所有对外函数都先调它，与历史模块保持同一范式。
@@ -1993,51 +1953,41 @@ mod tests {
     }
 
     #[test]
-    fn migration_moves_single_audio_into_a_recording_then_drops_the_column() {
+    fn schema_creation_yields_the_final_shape_without_legacy_columns() {
         let connection = Connection::open_in_memory().unwrap();
-        // 老库里的 history_id 指向真实历史行，先建历史表并造一条。
-        history_service::migrate_schema(&connection).unwrap();
-        seed_history(&connection, &[7]);
-        connection
-            .execute_batch(
-                "CREATE TABLE notes (id INTEGER PRIMARY KEY, transcript TEXT, \
-                 duration_sec REAL, history_id INTEGER, audio_file TEXT, created_at INTEGER); \
-                 INSERT INTO schema_meta (module, version, updated_at) VALUES ('notes', 1, 0);",
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO notes (id, transcript, duration_sec, history_id, audio_file, created_at) \
-                 VALUES (1, '旧转录', 12.5, 7, 'old.wav', ?1)",
-                params![now_millis()],
-            )
-            .unwrap();
-
         migrate_schema(&connection).unwrap();
+        migrate_schema(&connection).expect("建表重复执行是幂等的");
 
-        let recordings = list_recordings_with_connection(&connection, 1).unwrap();
-        assert_eq!(recordings.len(), 1);
-        assert_eq!(recordings[0].audio_file, "old.wav");
-        assert_eq!(recordings[0].transcript.as_deref(), Some("旧转录"));
-        assert_eq!(recordings[0].history_id, Some(7));
-        // v3 把这一列彻底删掉：音频只归 note_recordings，notes 不再有第二个事实源。
-        let column_exists: Option<String> = connection
-            .query_row(
-                "SELECT name FROM pragma_table_info('notes') WHERE name = 'audio_file'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info('notes')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert!(column_exists.is_none(), "v3 之后 notes.audio_file 应已删除");
-        let version: i64 = connection
-            .query_row(
-                "SELECT version FROM schema_meta WHERE module = 'notes'",
-                [],
-                |row| row.get(0),
-            )
+        assert!(
+            !columns.iter().any(|column| column == "audio_file"),
+            "notes 不该有 audio_file 列，音频只归 note_recordings"
+        );
+        for expected in ["history_id", "transcript", "duration_sec", "summary"] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "建表后应有 {expected} 列，实际: {columns:?}"
+            );
+        }
+
+        // 一条历史只能转出一篇笔记：唯一索引在。
+        let indexes: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='notes'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, NOTES_SCHEMA_VERSION);
+        assert!(
+            indexes.iter().any(|name| name == "idx_notes_history"),
+            "应有 notes(history_id) 唯一索引，实际: {indexes:?}"
+        );
     }
 
     /// 历史行被淘汰只应断开笔记侧的引用。

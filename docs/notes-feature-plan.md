@@ -84,7 +84,7 @@ created_at, updated_at
 
 | 能力 | 位置 | 复用方式 |
 |---|---|---|
-| SQLite 迁移范式 | `src/db.rs`（WAL + `schema_meta(module, version)` + 每次开连接） | 笔记模块复用同一个文件与连接工厂，只推进自己的 `notes` 版本行（见 §3.2） |
+| SQLite 建表范式 | `src/db.rs`（WAL + `ensure_schema` 事务 + 每次开连接） | 笔记模块复用同一个文件与连接工厂，只建自己的表（见 §3.2） |
 | 录音链路 | `commands/audio.rs:500 start_recording` / `:514 stop_recording`，`RecordingContext` 常驻根部 | **不能直接复用**：见下方「耦合点」 |
 | 流式转写 | `transcription-result` 事件（`interim` 标记 + `sessionId`） | 仅作为可选的实时模式，一期不用 |
 | 采集原语 | `audio_service::spawn_audio_capture_thread(stop_flag, samples, device)`（返回设备采样率） | **笔记录音直接用它**：只采集、不转写 |
@@ -111,14 +111,12 @@ created_at, updated_at
 > 历史与笔记同在一个数据库文件里，因为「历史 → 存为笔记」和笔记转写都是跨模块写，
 > 拆两个文件时既没有事务也没有外键，删笔记后历史行会变成悬空指针。
 >
-> 表与 schema 版本按模块划分（版本记在 `schema_meta(module, version)`），代码边界由
-> `history_service` / `notes_service` 承担。`notes.history_id`、`note_recordings.history_id`
-> 是指向 `transcription_history(id)` 的真外键，`ON DELETE SET NULL`。音频独立目录
-> `notes_audio/` 的结论不变。
+> 表按模块划分，代码边界由 `history_service` / `notes_service` 承担。`notes.history_id`、
+> `note_recordings.history_id` 是指向 `transcription_history(id)` 的真外键，
+> `ON DELETE SET NULL`。音频独立目录 `notes_audio/` 的结论不变。
 >
-> `notes.audio_file` 整列已删除（v2 起由 `note_recordings` 取代，迁移后恒为 NULL），
-> `NoteDetail.audioFile` 字段同步移除；`notes(history_id)` 有唯一索引，一条历史
-> 只能转出一篇笔记。下面两段 SQL 里残留的 `audio_file` 是 v1 的历史形态，仅供追溯。
+> `notes` 表不持有音频引用，音频只在 `note_recordings` 里；`notes(history_id)` 有唯一索引，
+> 一条历史只能转出一篇笔记。应用还没分发，表结构变了直接删库重建，不做版本迁移。
 > 「历史 → 存为笔记」与笔记转写落库各自在单个 `IMMEDIATE` 事务里完成。
 
 ```sql
@@ -144,13 +142,25 @@ CREATE TABLE notes (
   summary_source_hash TEXT,                          -- 素材指纹，判断摘要是否过期
   kind                TEXT    NOT NULL DEFAULT 'personal', -- personal | meeting | import
   duration_sec        REAL,
-  history_id          INTEGER,                       -- 关联 transcription_history.id
-  audio_file          TEXT,                          -- 录音文件名（notes_audio 内）；先有音频后有 history_id
+  history_id          INTEGER REFERENCES transcription_history(id) ON DELETE SET NULL,
   created_at          INTEGER NOT NULL,
   updated_at          INTEGER NOT NULL
 );
 CREATE INDEX idx_notes_folder  ON notes(folder_id, updated_at DESC);
 CREATE INDEX idx_notes_updated ON notes(updated_at DESC);
+CREATE UNIQUE INDEX idx_notes_history ON notes(history_id) WHERE history_id IS NOT NULL;
+
+CREATE TABLE note_recordings (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  note_id      INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  audio_file   TEXT    NOT NULL,                     -- 录音文件名（在 notes_audio 内）
+  duration_sec REAL,
+  transcript   TEXT,
+  history_id   INTEGER REFERENCES transcription_history(id) ON DELETE SET NULL,
+  sort_order   INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX idx_note_recordings_note ON note_recordings(note_id, sort_order, id);
 ```
 
 与 openwhispr 的差异：
@@ -239,7 +249,7 @@ start(state, app, note_id) -> NoteRecordingState   -- 校验麦克风/互斥，�
   · 每 30 秒：取出新增 PCM → ResamplerState 转 16k → 追加写入 wav
   · 只 emit note-recording-state（计时 + 电平），不调用任何 ASR
 stop(state, app) -> NoteRecordingResult { audio_file, duration_sec }
-  · join 采集线程 → 回填 WAV 头 → 写 notes.audio_file / duration_sec
+  · join 采集线程 → 回填 WAV 头 → 写 note_recordings.audio_file / duration_sec
   · 到此为止：不转写，等用户点「转文字」
 cancel(state)  -- 停止并删除文件（用户取消录音）
 ```
@@ -253,7 +263,7 @@ cancel(state)  -- 停止并删除文件（用户取消录音）
 命令里只有编排：
 
 ```
-audio_file = notes.audio_file                 -- 没有录音就报「这条笔记还没有录音」
+audio_file = note_recordings.audio_file      -- 没有录音就报「这条笔记还没有录音」
 result = transcription_service::transcribe_file(
              state, app, notes_service::note_audio_path(audio_file)?,
              Some(note.duration_sec), "转写失败")
@@ -278,7 +288,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 要点：
 
-- **音频只有一份，且在笔记自己的目录**：录音直接写 `notes_audio/{note_id}-{millis}.wav`，`notes.audio_file` 存名字，转写只把绝对路径传给引擎，全程不复制、不读字节。为什么不用 `history_audio/`：那里在 `initialize()` 里会清孤儿（且启动时租约表被清空），未转写、没被历史行引用的录音会被删掉。代价是笔记要自己负责回收：删笔记/删目录/启动清残留三处。
+- **音频只有一份，且在笔记自己的目录**：录音直接写 `notes_audio/{note_id}-{millis}.wav`，`note_recordings.audio_file` 存名字，转写只把绝对路径传给引擎，全程不复制、不读字节。为什么不用 `history_audio/`：那里在 `initialize()` 里会清孤儿（且启动时租约表被清空），未转写、没被历史行引用的录音会被删掉。代价是笔记要自己负责回收：删笔记/删目录/启动清残留三处。
 - **历史行不带音频**：`audio_file = None`，历史页能看到这条记录、能导出文本，播放按钮自然不出现（`audio_available` 由 `safe_audio_path` 判定，天然为 false）。需要在历史详情注明「录音在笔记中」，避免用户以为丢了。
 - **`mode`/`workflow` 取 `"note"`**：历史页会多一类记录（可查看、可导出文本，但不可播放）。`ensure_reprocessable_workflow` 目前只放行 `"dictation"`，笔记不做历史页「重新识别」，改用笔记自己的「重新转写」，避免两套语义打架。
 - **「只录音、未转写」是正常状态**：列表与详情要能区分三种态（有录音无文本 / 转写中 / 已转写），主按钮文案随之切换（转文字 / 重新转写 / 生成笔记）。
@@ -340,7 +350,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 ```
 笔记页「开始录音」→ start_note_recording（只采集，wav 边录边落盘，切页不断）
    → 录音中：转录 tab 显示「录音中 · 结束后可转文字」+ 计时/电平
-   → 「停止」→ stop_note_recording：回填 wav 头，写 notes.audio_file + duration_sec
+   → 「停止」→ stop_note_recording：回填 wav 头，写 note_recordings.audio_file + duration_sec
    → 转录 tab 显示「转文字」按钮（此时笔记已有录音，可以直接播放/留存）
    → 点「转文字」→ transcribe_note_recording：调 transcription_service::transcribe_file（只传路径）
    → 转写完：notes.transcript + history_id 落库，历史页出现一条 mode="note" 记录
@@ -421,7 +431,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 - [x] `notes_service` 的音频回收：删笔记时删文件 / 启动清 `notes_audio/` 里未被引用的残留（含崩溃半截录音补写长度）
 - [x] `note_recording_service.rs`：采集会话、排空重采样落盘、时长、停止/取消、`AppState.note_capture` 互斥
 - [x] 4 个命令（`start/stop/cancel/get_state`）+ `note-recording-state` 事件 + `formal/verification.json` 登记（152 命令 / 22 事件）
-- [x] `RecordingBar`：计时 / 电平 / 停止 / 取消；停止后写 `notes.audio_file` + `duration_sec`
+- [x] `RecordingBar`：计时 / 电平 / 停止 / 取消；停止后写 `note_recordings.audio_file` + `duration_sec`
 - 验收：录 10 分钟可随时切页；停止后音频文件存在且能播放；**录音后直接重启应用，文件仍在**；「有录音未转写」状态在列表与详情可见
 - 实现说明（与原计划的差异）：
   - **落盘间隔 500ms 而不是 30 秒**。崩溃最多丢半秒；UI 计时与电平也需要更细的粒度。16k 单声道每秒只有 32KB，代价可以忽略。
@@ -454,7 +464,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 追加（2026-11-19）：一条笔记保留多段录音
 
 - 用户确认产品语义：同一条笔记再次录音**不覆盖**，而是新增一段。原设计的 `notes.audio_file` 单槽会在第二次 stop 时把旧段变孤儿，且 `transcript` 非空导致新段永远不会被转写。
-- schema 升到 `user_version=2`：新增 `note_recordings`（note_id / audio_file / duration_sec / transcript / history_id / sort_order / created_at）。迁移在同一 IMMEDIATE 事务里把老 `notes.audio_file` 非空的行灌成一段，再置空旧列；之后 `notes` 不再持有音频引用。（此处 `user_version` 是 2026-11-19 当时的机制，已在 2026-11-20 换成 `schema_meta(module, version)`；`notes.audio_file` 也已在 schema v3 删除。）
+- schema 升到 `user_version=2`：新增 `note_recordings`（note_id / audio_file / duration_sec / transcript / history_id / sort_order / created_at）。迁移在同一 IMMEDIATE 事务里把老 `notes.audio_file` 非空的行灌成一段，再置空旧列；之后 `notes` 不再持有音频引用。（本条是 2026-11-19 当时的机制与数据形态记录：版本机制与迁移链在 2026-11-20 已整体删除，现在改表结构直接删库重建；`notes.audio_file` 列也已不存在，音频只归 `note_recordings`。）
 - 每次 start/stop 追加一段；删笔记返回**所有**段文件名交给录音侧清理；启动孤儿清理的引用集合改读段表；删除单段时删文件并重算聚合。
 - 「转文字」改为**段级幂等**：只转 `transcript` 为空的段，每段一条 `history(mode="note", audio_file=NULL)`，成功后写段转录；最后把段转录按 `\n\n` 拼回 `notes.transcript`、时长求和。中途失败保留已成功段，重试只补未转的；并发仍由 `AppState.note_transcription` 按笔记 ID 挡。
 - 笔记页转录 tab 增加分段列表（序号 / 时长 / 状态 / 在文件夹中显示 / 删除段），解决「转录后找不到录音文件」——文件一直在 `notes_audio/`，只是原先界面没有任何入口。P2 历史转存来的笔记没有段，继续显示「录音在历史记录中」。
@@ -524,7 +534,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 | 长转录摘要 | 无 token 计数器，只能按字符估算，可能超出模型窗口 | 用保守预算（12k 字符/块）+ 失败重试降块；错误提示要具体 |
 | 删除语义 | 一期无回收站，误删不可恢复 | 删除前二次确认；若加软删除，成本不高（`deleted_at` + 列表过滤） |
 | 摘要质量 | 本地小模型易丢数字与人名 | 沿用 openwhispr 已验证的提示（强调不得编造、保留专名与数字），并在 UI 标注「AI 生成，需核对」 |
-| 数据迁移 | 与历史同库但表独立（见 §3.2） | 无历史数据时不需迁移；老库文件由开发期直接丢弃 |
+| 数据迁移 | 应用还没分发，表结构变了直接删库重建 | 不维护迁移链，改结构时清一次数据即可 |
 | 笔记音频无人回收 | `notes_audio/` 不归历史 GC 管，删笔记/崩溃残留会越积越多（1 小时约 115MB） | 三处回收：删笔记删文件、删目录级联、启动扫未被 notes 引用的残留；配套单测 + 一个「磁盘占用」可见性（设置页显示目录大小，可选） |
 | 历史记录无音频 | 笔记转写写的历史行 `audio_file=NULL`，历史页播放按钮消失，用户可能以为录音丢了 | 历史详情对 `mode="note"` 显示「录音在笔记中」并可跳转；不复制音频是刻意取舍（否则 1 小时多 115MB） |
 | 录音与笔记一致性 | 停止录音时文件写失败，笔记可能只剩时长没有音频 | 先落文件、回填头，再写 `note_recordings`；任一步失败就整体回滚并明确报错。转写失败不影响录音与手写笔记 |
@@ -573,5 +583,5 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 14. 单元格里按回车 = **在下方加一行**，不是拆段落。原因是 `tiptap-markdown` 的表格序列化遇到多段落单元格会直接输出 `[table]`，整张表内容消失；管道表本身也只能是一行一单元格。
 7. 转写复用的粒度：**不做全量收口**。现存三处分派是三种执行策略（听写兜底 / 上传页 interim 预览 / 历史重新识别），合成一个带回调的万能函数，省下的只是每处 6 行 `match`，却把两条主流程的回归面绑在一起。只加一个窄接口 `transcription_service::transcribe_file(path, duration)`：本地引擎经新增的 `funasr_service::transcribe_path` **直接下发文件路径**（Python 端 `ServerCommand::Transcribe` 已支持 `audio_path`，不读字节、不写临时文件），在线引擎走 `check_engine_limit` + 既有在线 service。
-8. 音频归属：录音写进**独立目录 `notes_audio/`**，`notes.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（`history_service.rs:297-303` 先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
-9. 多段语义（2026-11-19 修订第 8 条）：一条笔记的多次录音**全部保留**，由 `note_recordings` 子表持有；`notes.audio_file` 单槽在迁移后置空、不再写入。选子表而非把多段塞进 JSON：要按段查未转写、按段删、给启动 GC 提供引用集合。转录是段级幂等 + 拼接，不做整段合并转写（那要在磁盘临时拼 WAV，违背零复制，且失败无法单段重试）。
+8. 音频归属：录音写进**独立目录 `notes_audio/`**，`note_recordings.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（`history_service.rs:297-303` 先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
+9. 多段语义（2026-11-19 修订第 8 条）：一条笔记的多次录音**全部保留**，由 `note_recordings` 子表持有；`notes` 表不再持有音频引用。选子表而非把多段塞进 JSON：要按段查未转写、按段删、给启动 GC 提供引用集合。转录是段级幂等 + 拼接，不做整段合并转写（那要在磁盘临时拼 WAV，违背零复制，且失败无法单段重试）。
