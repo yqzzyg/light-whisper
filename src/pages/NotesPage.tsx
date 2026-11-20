@@ -120,6 +120,18 @@ export default function NotesPage({
     toast.success(t("notes.transcribeDone"));
   };
 
+  /** 整篇重新转写：覆盖现有转录（换引擎重转走这条路），所以先确认一次。 */
+  const handleRetranscribe = async () => {
+    if (!note || transcription.running) return;
+    if (!window.confirm(t("notes.retranscribeAllConfirm"))) return;
+    const error = await transcribeNote(note.id, true);
+    if (error) {
+      toast.error(t("notes.transcribeFailed", { message: error }));
+      return;
+    }
+    toast.success(t("notes.retranscribeAllDone"));
+  };
+
   /** 只重转一段：已转写的段也允许重来，挑出识别不佳的那一段。 */
   const handleTranscribeSegment = async (recordingId: number) => {
     if (!note || transcription.running) return;
@@ -216,6 +228,7 @@ export default function NotesPage({
             transcription={transcription}
             onStartRecording={() => void handleStartRecording()}
             onTranscribe={() => void handleTranscribe()}
+            onRetranscribe={() => void handleRetranscribe()}
             onTranscribeSegment={(id) => void handleTranscribeSegment(id)}
             onRevealRecording={(id) => void handleRevealRecording(id)}
             onDeleteRecording={handleDeleteRecording}

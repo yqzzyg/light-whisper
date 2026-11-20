@@ -394,6 +394,7 @@ pub fn run() {
             commands::notes::delete_note,
             commands::notes::move_note,
             commands::notes::create_note_from_history,
+            commands::notes::find_note_by_history,
             commands::notes::list_note_recordings,
             commands::notes::delete_note_recording,
             commands::notes::reveal_note_audio,

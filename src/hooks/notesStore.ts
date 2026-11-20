@@ -7,6 +7,7 @@ import {
   deleteNote as apiDeleteNote,
   deleteNoteFolder as apiDeleteNoteFolder,
   deleteNoteRecording as apiDeleteNoteRecording,
+  findNoteByHistory as apiFindNoteByHistory,
   getNote,
   listNoteFolders,
   listNoteRecordings,
@@ -367,8 +368,30 @@ export async function createNoteFromHistory(historyId: number): Promise<NoteDeta
   return note;
 }
 
-export async function moveNote(id: number, folderId: number | null): Promise<void> {
-  try {
+/**
+ * 历史记录 → 打开它所属的笔记。
+ *
+ * 覆盖两条来源：「存为笔记」转存的记录（`history_id` 在笔记上）与会议录音
+ * 写的历史行（`history_id` 在录音段上）。返回 `null` 表示笔记已被删除而历史
+ * 行还在，调用方要给出明确提示，别让用户跳到笔记页看空白。
+ */
+export async function openNoteByHistory(historyId: number): Promise<number | null> {
+  const noteId = await apiFindNoteByHistory(historyId);
+  if (noteId == null) return null;
+  await refreshNotes(true);
+  await openNote(noteId);
+  // 目标笔记可能在折叠的目录里：展开它，否则侧栏仍看不到选中的那条。
+  const folderId = state.note?.id === noteId ? state.note.folderId : null;
+  if (folderId != null) {
+    emit({
+      activeFolderId: folderId,
+      collapsedFolderIds: expandFolder(state.collapsedFolderIds, folderId),
+    });
+  }
+  return noteId;
+}
+
+export async function moveNote(id: number, folderId: number | null): Promise<void> {  try {
     const moved = await apiMoveNote(id, folderId);
     if (moved && state.note && state.note.id === id) {
       emit({

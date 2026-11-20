@@ -806,6 +806,37 @@ fn find_note_by_history_with_connection(
         .map_err(|error| format!("读取笔记失败: {error}"))
 }
 
+/// 按历史记录反查笔记 id。
+///
+/// 两条路径都要走，缺一条就有一半的历史行点不动：
+/// - 「历史 → 存为笔记」的笔记把 `history_id` 记在 `notes` 上；
+/// - 会议录音写的历史行归属于某个**录音段**，`notes.history_id` 是空的，
+///   只能从 `note_recordings.history_id` 反查（多段笔记任一段命中都算）。
+fn find_note_id_by_history_with_connection(
+    connection: &Connection,
+    history_id: i64,
+) -> Result<Option<i64>, String> {
+    let direct = connection
+        .query_row(
+            "SELECT id FROM notes WHERE history_id = ?1 ORDER BY id LIMIT 1",
+            params![history_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("反查笔记失败: {error}"))?;
+    if direct.is_some() {
+        return Ok(direct);
+    }
+    connection
+        .query_row(
+            "SELECT note_id FROM note_recordings WHERE history_id = ?1 ORDER BY id LIMIT 1",
+            params![history_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("反查笔记失败: {error}"))
+}
+
 fn recording_from_row(row: &Row<'_>) -> rusqlite::Result<NoteRecording> {
     Ok(NoteRecording {
         id: row.get(0)?,
@@ -1078,6 +1109,17 @@ pub async fn get_note(id: i64) -> Result<Option<NoteDetail>, String> {
     .map_err(|error| format!("读取笔记任务失败: {error}"))?
 }
 
+/// 历史记录 → 笔记 id；`None` 表示这条历史行对应的笔记已经被删。
+pub async fn find_note_id_by_history(history_id: i64) -> Result<Option<i64>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        find_note_id_by_history_with_connection(&connection, history_id)
+    })
+    .await
+    .map_err(|error| format!("反查笔记任务失败: {error}"))?
+}
+
 /// 所有被笔记引用的音频文件名。
 ///
 /// 只给启动清理用：录音目录里不在这份集合中的文件就是没人认领的残留。
@@ -1329,6 +1371,46 @@ mod tests {
         let folder = insert_folder_with_connection(&connection, " 会议 ").unwrap();
         assert_eq!(folder.name, "会议");
         assert!(insert_folder_with_connection(&connection, "会议").is_err());
+    }
+
+    #[test]
+    fn history_lookup_covers_imported_notes_and_meeting_segments() {
+        let connection = memory_connection();
+
+        // 路径一：「历史 → 存为笔记」，history_id 记在 notes 上。
+        let (imported, _) = create_note_from_transcript_with_connection(
+            &connection,
+            None,
+            "导入的笔记",
+            "import",
+            "转录内容",
+            None,
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            find_note_id_by_history_with_connection(&connection, 7).unwrap(),
+            Some(imported.id)
+        );
+
+        // 路径二：会议录音，history_id 在段表上，notes.history_id 为空。
+        let meeting = insert_note_with_connection(&connection, None, "周会", "meeting").unwrap();
+        assert!(meeting.history_id.is_none());
+        let segment = add_recording_with_connection(&connection, meeting.id, "a.wav", None)
+            .unwrap()
+            .unwrap();
+        set_recording_transcript_with_connection(&connection, segment.id, "第一段", Some(99))
+            .unwrap();
+        assert_eq!(
+            find_note_id_by_history_with_connection(&connection, 99).unwrap(),
+            Some(meeting.id)
+        );
+
+        // 笔记已删、历史行还在：返回 None 而不是报错，前端才能提示「笔记已删除」。
+        assert_eq!(
+            find_note_id_by_history_with_connection(&connection, 12345).unwrap(),
+            None
+        );
     }
 
     #[test]

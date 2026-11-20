@@ -215,6 +215,14 @@ pub async fn create_note_from_history(
     Ok(note)
 }
 
+/// 历史记录反查笔记 id：历史卡片上的「打开笔记」用它跳转。
+///
+/// 返回 `None` 表示笔记已被删除（历史行还在），前端据此提示而不是静默跳不过去。
+#[tauri::command]
+pub async fn find_note_by_history(history_id: i64) -> Result<Option<i64>, String> {
+    notes_service::find_note_id_by_history(history_id).await
+}
+
 /// 只保留最后一段文件名，挡住前端拼出来的路径分隔符与空名。
 fn sanitize_file_name(raw: &str) -> Result<String, String> {
     let name = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();

@@ -1,6 +1,6 @@
 # 笔记功能 — 方案调研与工作清单
 
-> 状态：P0/P1/P2/P3 已完成，编辑器换成所见即所得（TipTap），P4（AI 摘要）已完成，P5 的「超长会议切片转写」已落地 · 最后更新：2026-11-20
+> 状态：P0/P1/P2/P3 已完成，编辑器换成所见即所得（TipTap），P4（AI 摘要）已完成，P5 已落「超长会议切片转写 / 历史 → 笔记反查 / 重新转写」 · 最后更新：2026-11-20
 > 目标：左侧栏新增「笔记」，支持建立笔记目录、在目录下创建笔记；最终能在会议时录音并据此生成笔记。
 > 参考实现：`D:\MyData\Code\CodeWorkSpace\StudyProject\StudyAi\whisper\openwhispr`（桌面端 + 移动端）。
 
@@ -432,11 +432,11 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 - 验收（容错）：转写阶段断网/切引擎/引擎报错，音频仍在，按钮回到「转文字」可重试；在线引擎超限给明确文案而不是泛化失败
 - 实现说明（与原计划的差异）：
   - **转写失败不写历史**。笔记场景的错误在笔记里就地展示，写一条 0 字历史只会污染列表；成功才 `insert`，因此重试永远不会多出第二条（原先设计的「失败留痕 + 原地更新」被省掉）。
-  - **幂等靠「已有转录直接返回」**：`transcribe_note_recording` 先读笔记，`transcript` 非空即原样返回，不重跑 ASR。想换引擎重转需要 P5 的「重新转写」，一期不做。
+  - **幂等靠「已有转录直接返回」**：`transcribe_note_recording` 默认只转空段，`transcript` 非空即跳过。要换引擎重转走显式 `force=true`（2026-11-20 补齐，见 P5）。
   - **并发保护是后端原子占位**（`AppState.note_transcription`），不是前端 `disabled`：连点、两窗口、两个入口都挡在服务层，前端按钮只是配合。
   - **在线引擎先看文件元数据再读字节**：GLM 的 30 秒与 DashScope 的 10MB 判据都能在 `metadata().len()` 上判，避免为了一句超限提示把上百兆读进内存。
   - **历史行的 `session_id` 用毫秒时间戳**（笔记没有录音会话 ID），与导入同一套做法。
-  - 历史页新增 `note` 模式文案与「录音保存在笔记里」提示；从历史跳到笔记需要 `history_id → note` 反查命令，列入 P5。
+  - 历史页新增 `note` 模式文案与「录音保存在笔记里」提示；2026-11-20 补上 `history_id → note` 反查命令与「打开笔记」入口（见 P5）。
 
 追加（2026-11-19）：一条笔记保留多段录音
 
@@ -448,8 +448,8 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 追加（2026-11-19，界面反馈）：分段列表支持**应用内直接播放**与**单段转录**。
 - 播放走 Tauri asset protocol：`tauri.conf.json` 开 `app.security.assetProtocol`（静态 scope 留空）+ Cargo 启 `protocol-asset` feature；CSP 加 `media-src 'self' asset: http://asset.localhost blob: data:`。新增 `note_recording_audio_url(recording_id)`：校验段与文件后按文件调 `asset_protocol_scope().allow_file()`（最小权限，不开放整个数据目录），返回 plain 路径，前端 `convertFileSrc` 转 URL 后喂给原生 `<audio autoplay controls>`；同一时刻只展开一个播放器。
-- 单段转录新增 `transcribe_note_recording_segment(recording_id)`，与整篇共用 `transcribe_one_recording`（校验路径 → 引擎 → 写历史 → 写段转录）。**单段不看幂等**：已转写的段也允许重跑，挑识别不佳的重来；重转新增一条历史（历史是追加日志，不删旧的）。并发仍按 note_id 占位。前端 `noteTranscriptionState` 加 `recordingId`，只在该段显示进度。
-- 已知取舍：多段笔记的 `notes.history_id` 留空（每段各自写历史），所以 P5 的「历史 → 笔记反查跳转」需要按段表的 `history_id` 适配。
+- 单段转录新增 `transcribe_note_recording_segment(recording_id)`，与整篇共用 `transcribe_one_recording`（校验路径 → 引擎 → 写历史 → 写段转录）。**单段不看幂等**：已转写的段也允许重跑，挑识别不佳的重来；2026-11-20 起重转**就地更新**原来的历史行（此前是新插一条，会堆重复记录且旧行成死链）。并发仍按 note_id 占位。前端 `noteTranscriptionState` 加 `recordingId`，只在该段显示进度。
+- 已知取舍：多段笔记的 `notes.history_id` 留空（每段各自写历史），历史反查因此要按段表的 `history_id` 兜底（2026-11-20 已实现）。
 
 ### P4 AI 摘要生成（已完成 2026-11-19）
 
@@ -472,14 +472,23 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 ### P5 打磨（可选）
 
-- [ ] 全局搜索（`Ctrl+K`，跨标题/正文/转录）
+- [ ] 全局搜索（`Ctrl+K`，跨标题/正文/转录）——后端 `LIKE` 检索已有，缺浮层与快捷键
 - [x] 笔记导出 Markdown / txt（已提前到 P1/P2：正文栏导出 md，转录 tab 导出 txt）
-- [ ] 删除二次确认 + 回收站（若需要）
+- [x] 删除二次确认（笔记 / 目录 / 录音段三处均有，2026-11-20 补强文案：明说音频文件一并从磁盘删除）
+- [ ] 回收站（软删除 `deleted_at` + 列表过滤 + 清空），一期没做
 - [ ] 目录拖拽排序、笔记拖拽入目录
 - [x] 超长会议分段转写：>2 小时按 30 分钟切片、逐段转写再拼接（已完成，见下方说明）
 - [ ] 可选「边录边转」开关（默认关）：打开后走首页已验证的实时流式链路，代价是持续推理耗电
-- [ ] 「重新转写」：已有转录时允许换引擎重跑（后端幂等分支当前会直接返回）
-- [ ] 历史 → 笔记反查跳转：新增按 `history_id` 取笔记的命令，历史卡片上直接打开对应笔记
+- [x] 「重新转写」：`transcribe_note_recording(force)` 忽略已有转录、整篇重跑并覆盖（2026-11-20）
+- [x] 历史 → 笔记反查跳转：`find_note_by_history` 命令 + 历史卡片「打开笔记」（2026-11-20）
+
+#### 历史反查与重新转写（2026-11-20 落地）
+
+- **反查走两条路**：`notes.history_id`（历史 → 存为笔记）与 `note_recordings.history_id`（会议录音的段）。少一条就有一半历史行点不动。
+- **笔记已删时返回 `None`**，前端提示「对应的笔记已被删除」，不跳空白页。
+- **笔记转写的历史行不再提供「存为笔记」**：转录本来属于某条笔记，再存会造重复笔记；这类记录给的是「打开笔记」。
+- **重新转写 = 显式 `force`**：不传时保持原幂等（只转空段）。传 `true` 则全部重跑覆盖；没有录音段的笔记（转录来自历史）直接报错说明原因。
+- **历史行就地更新**（`history_service::update_transcription_result`）：同一段录音重转 N 次不该堆 N 条重复历史。段表的 `history_id` 只能指向最新一条，旧行在历史页会变成「笔记已删除」的死链。单段重转同样改为就地更新。
 
 #### 超长会议切片转写（2026-11-20 落地）
 

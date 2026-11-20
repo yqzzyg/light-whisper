@@ -152,11 +152,15 @@ export function useNoteTranscription(): NoteTranscriptionState {
 /**
  * 转写一篇笔记的录音。返回错误文案（成功为 `null`），由调用方决定是否弹 toast。
  *
+ * `force = true` 是整篇「重新转写」：已有转录的段也重跑并覆盖，换引擎时用。
  * 已有转写在跑时直接返回 `null` 而不是报错：按钮本身是禁用的，能走到这里只能是
  * 双击的竞态，没必要给用户看一句「正在转写」。
  */
-export async function transcribeNote(noteId: number): Promise<string | null> {
-  return runTranscription(noteId, null, () => transcribeNoteRecording(noteId));
+export async function transcribeNote(
+  noteId: number,
+  force = false,
+): Promise<string | null> {
+  return runTranscription(noteId, null, () => transcribeNoteRecording(noteId, force));
 }
 
 /**

@@ -526,6 +526,9 @@
     "commands::notes::create_note_from_history": [
       "notes"
     ],
+    "commands::notes::find_note_by_history": [
+      "notes"
+    ],
     "commands::notes::list_note_recordings": [
       "notes"
     ],
@@ -3500,6 +3503,7 @@
     "commands::notes::delete_note": "src-tauri/src/commands/notes.rs#fn delete_note(",
     "commands::notes::move_note": "src-tauri/src/commands/notes.rs#fn move_note(",
     "commands::notes::create_note_from_history": "src-tauri/src/commands/notes.rs#pub async fn create_note_from_history(",
+    "commands::notes::find_note_by_history": "src-tauri/src/commands/notes.rs#pub async fn find_note_by_history(",
     "commands::notes::list_note_recordings": "src-tauri/src/commands/notes.rs#pub async fn list_note_recordings(",
     "commands::notes::delete_note_recording": "src-tauri/src/commands/notes.rs#pub async fn delete_note_recording(",
     "commands::notes::reveal_note_audio": "src-tauri/src/commands/notes.rs#pub async fn reveal_note_audio(",

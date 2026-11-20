@@ -12,6 +12,7 @@ import {
   Mic,
   Pause,
   Play,
+  RefreshCw,
   Sparkles,
   Trash2,
   X,
@@ -106,6 +107,8 @@ export interface NoteEditorProps {
   transcription: NoteTranscriptionState;
   onStartRecording: () => void;
   onTranscribe: () => void;
+  /** 整篇重新转写：忽略已有转录、覆盖重跑（换引擎时用，调用方负责二次确认）。 */
+  onRetranscribe: () => void;
   onTranscribeSegment: (recordingId: number) => void;
   onRevealRecording: (id: number) => void;
   onDeleteRecording: (id: number) => void;
@@ -127,6 +130,7 @@ export default function NoteEditor({
   transcription,
   onStartRecording,
   onTranscribe,
+  onRetranscribe,
   onTranscribeSegment,
   onRevealRecording,
   onDeleteRecording,
@@ -466,6 +470,20 @@ export default function NoteEditor({
           <div className="notes-toolbar">
             <span>{t("notes.charCount", { count: transcript.trim().length })}</span>
             <span className="notes-toolbar-spacer" />
+            {/* 整篇重转：换了引擎、或整段识别都不理想时用。它会覆盖现有转录，
+                所以调用方必须先问一次；没有录音段的笔记不出现这个入口。 */}
+            {transcript.trim() && recordings.length > 0 && (
+              <button
+                type="button"
+                className="notes-toolbar-btn"
+                disabled={transcription.running}
+                title={t("notes.retranscribeAllHint")}
+                onClick={onRetranscribe}
+              >
+                <RefreshCw size={12} />
+                {t("notes.retranscribeAll")}
+              </button>
+            )}
             <button
               type="button"
               className="notes-toolbar-btn"

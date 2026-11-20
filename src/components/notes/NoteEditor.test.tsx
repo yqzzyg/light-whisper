@@ -126,6 +126,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NoteEditor>> = {})
     },
     onStartRecording: vi.fn(),
     onTranscribe: vi.fn(),
+    onRetranscribe: vi.fn(),
     onTranscribeSegment: vi.fn(),
     onRevealRecording: vi.fn(),
     onDeleteRecording: vi.fn(),
@@ -295,6 +296,28 @@ describe("NoteEditor", () => {
 
     const button = screen.getByRole("button", { name: "notes.transcribe" });
     expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers a whole-note re-transcribe once the transcript exists", () => {
+    const props = setup({
+      note: detail({ transcript: "第一段" }),
+      recordings: [recording({ transcript: "第一段" })],
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "notes.retranscribeAll" }));
+    expect(props.onRetranscribe).toHaveBeenCalled();
+  });
+
+  it("hides the whole-note re-transcribe when the audio lives in history", () => {
+    // 从历史转存来的笔记没有录音段，重转无从下手，不该给一个点了报错的按钮。
+    setup({
+      note: detail({ transcript: "来自历史", historyId: 42 }),
+      recordings: [],
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "notes.transcript" }));
+
+    expect(screen.queryByRole("button", { name: "notes.retranscribeAll" })).toBeNull();
   });
 
   it("surfaces the failure message inline for the failed note", () => {

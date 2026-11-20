@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   listNoteRecordings: vi.fn(),
   moveNote: vi.fn(),
   createNoteFromHistory: vi.fn(),
+  findNoteByHistory: vi.fn(),
 }));
 vi.mock("@/api/tauri", () => api);
 
@@ -25,6 +26,7 @@ import {
   flushNoteSave,
   getNotesSnapshot,
   openNote,
+  openNoteByHistory,
   removeNote,
   removeNoteRecording,
   resetNotesStoreForTests,
@@ -229,6 +231,31 @@ describe("notesStore", () => {
 
     await expect(createNoteFromHistory(42)).rejects.toThrow("没有转写文本");
     expect(getNotesSnapshot().selectedNoteId).toBeNull();
+  });
+
+  it("opens the note behind a history record and returns its id", async () => {
+    await ensureNotesLoaded();
+    api.findNoteByHistory.mockResolvedValue(5);
+    api.getNote.mockResolvedValue(detail(5, "周会纪要"));
+
+    const noteId = await openNoteByHistory(42);
+
+    expect(api.findNoteByHistory).toHaveBeenCalledWith(42);
+    expect(noteId).toBe(5);
+    expect(getNotesSnapshot().selectedNoteId).toBe(5);
+    // 列表要刷新，否则侧栏里可能没有这条笔记
+    expect(api.listNotes).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null instead of opening a blank page when the note is gone", async () => {
+    await ensureNotesLoaded();
+    api.findNoteByHistory.mockResolvedValue(null);
+
+    const noteId = await openNoteByHistory(42);
+
+    expect(noteId).toBeNull();
+    expect(getNotesSnapshot().selectedNoteId).toBeNull();
+    expect(api.getNote).not.toHaveBeenCalled();
   });
 
   it("loads the recording segments together with the open note", async () => {

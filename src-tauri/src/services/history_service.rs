@@ -876,6 +876,54 @@ pub async fn update_total_ms(id: i64, total_ms: u64) -> Result<bool, String> {
     .map_err(|error| format!("更新历史总耗时任务失败: {error}"))?
 }
 
+/// 就地重写一条历史行的转写结果（笔记「重新转写」用）。
+///
+/// 为什么不新插一行：同一条录音重转 N 次会堆出 N 条重复历史，而笔记段表只能
+/// 指向最新那条 —— 旧行在历史页点「打开笔记」就会变成「笔记已删除」的死链。
+/// 这里保留 `id` / `created_at`，只换文本、引擎与耗时，历史列表顺序也不跳。
+pub async fn update_transcription_result(
+    id: i64,
+    text: &str,
+    engine: &str,
+    language: Option<String>,
+    asr_ms: Option<u64>,
+    total_ms: Option<u64>,
+    duration_sec: Option<f64>,
+) -> Result<bool, String> {
+    let asr_ms = asr_ms.and_then(|value| i64::try_from(value).ok());
+    let text = text.to_string();
+    let engine = engine.to_string();
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        connection
+            .execute(
+                "UPDATE transcription_history SET \
+                    text = ?2, original_text = ?2, engine = ?3, \
+                    language = COALESCE(?4, language), \
+                    asr_ms = COALESCE(?5, asr_ms), \
+                    total_ms = COALESCE(?6, total_ms), \
+                    duration_sec = COALESCE(?7, duration_sec), \
+                    updated_at = ?8 \
+                 WHERE id = ?1",
+                params![
+                    id,
+                    text,
+                    engine,
+                    language,
+                    asr_ms,
+                    total_ms.and_then(|value| i64::try_from(value).ok()),
+                    duration_sec,
+                    now_millis()
+                ],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|error| format!("重写历史转写失败: {error}"))
+    })
+    .await
+    .map_err(|error| format!("重写历史转写任务失败: {error}"))?
+}
+
 fn cleanup_expired_with_connection(
     connection: &mut Connection,
     retention_days: u32,

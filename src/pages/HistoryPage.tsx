@@ -9,6 +9,7 @@ import {
   Clock3,
   Copy,
   Download,
+  ExternalLink,
   FileAudio,
   FolderOpen,
   Minus,
@@ -33,7 +34,7 @@ import {
   revealHistoryAudio,
 } from "@/api/tauri";
 import TitleBar from "@/components/TitleBar";
-import { createNoteFromHistory } from "@/hooks/notesStore";
+import { createNoteFromHistory, openNoteByHistory } from "@/hooks/notesStore";
 import { prefersReducedMotion } from "@/lib/motion";
 import type {
   PersistentHistoryRecord,
@@ -227,6 +228,28 @@ export default function HistoryPage({
     }
   };
 
+  /**
+   * 笔记转写写的历史行：回到它所属的笔记。
+   *
+   * 这类记录的音频不在历史目录里，只有跳过去才能听到录音、继续编辑。
+   */
+  const openNote = async (record: PersistentHistoryRecord) => {
+    if (workingId != null) return;
+    setWorkingId(record.id);
+    try {
+      const noteId = await openNoteByHistory(record.id);
+      if (noteId == null) {
+        toast.error(t("historyPage.openNoteMissing"));
+        return;
+      }
+      onNavigate("notes");
+    } catch (error) {
+      toast.error(t("historyPage.openNoteFailed", { error: errorMessage(error) }));
+    } finally {
+      setWorkingId(null);
+    }
+  };
+
   const remove = async (record: PersistentHistoryRecord) => {
     if (workingId != null) return;
     if (!window.confirm(t("historyPage.deleteConfirm"))) return;
@@ -368,6 +391,10 @@ export default function HistoryPage({
               const expanded = expandedId === record.id;
               const isWorking = workingId === record.id;
               const canReprocess = record.workflow === "dictation";
+              // 笔记转写写的历史行不再提供「存为笔记」：转录本来就属于某条笔记，
+              // 再存一次会造出一条重复笔记。这类记录给的是「打开笔记」。
+              const isNoteRecord = record.mode === "note";
+              const canSaveAsNote = !failed && !!record.text && !isNoteRecord;
               return (
                 <div className="history-record-motion" data-removing={removingId === record.id} key={record.id}>
                 <div className="history-record-clip">
@@ -448,7 +475,12 @@ export default function HistoryPage({
                         <FolderOpen size={13} />
                       </button>
                     )}
-                    {!failed && record.text && (
+                    {isNoteRecord && (
+                      <button className="icon-btn icon-btn-sm" disabled={isWorking} title={t("historyPage.openNote")} aria-label={t("historyPage.openNote")} onClick={() => void openNote(record)}>
+                        <ExternalLink size={13} />
+                      </button>
+                    )}
+                    {canSaveAsNote && (
                       <button className="icon-btn icon-btn-sm" disabled={isWorking} title={t("historyPage.saveToNotes")} aria-label={t("historyPage.saveToNotes")} onClick={() => void saveAsNote(record)}>
                         <NotebookPen size={13} />
                       </button>

@@ -810,6 +810,11 @@ export function createNoteFromHistory(
   return invokeCommand<NoteDetail>("create_note_from_history", { historyId, folderId });
 }
 
+/** 历史记录反查笔记 id；`null` 表示对应笔记已被删除。 */
+export function findNoteByHistory(historyId: number): Promise<number | null> {
+  return invokeCommand<number | null>("find_note_by_history", { historyId });
+}
+
 /** 列出一条笔记的所有录音段，按录音时间正序。 */
 export function listNoteRecordings(noteId: number): Promise<NoteRecording[]> {
   return invokeCommand<NoteRecording[]>("list_note_recordings", { noteId });
@@ -876,9 +881,15 @@ export function getNoteRecordingState(): Promise<NoteRecordingSnapshot> {
  *
  * 后端直接把录音路径交给引擎，不复制音频；每段只写一条历史，已转写的段直接
  * 跳过。长会议可能要几分钟，期间前端可以切走。
+ *
+ * `force = true` 是「重新转写」：忽略已有转录、全部重跑并覆盖，历史行就地更新
+ * （换引擎重转用）。没有录音段的笔记（转录来自历史记录）会明确报错。
  */
-export function transcribeNoteRecording(noteId: number): Promise<NoteDetail> {
-  return invokeCommand<NoteDetail>("transcribe_note_recording", { noteId });
+export function transcribeNoteRecording(
+  noteId: number,
+  force = false,
+): Promise<NoteDetail> {
+  return invokeCommand<NoteDetail>("transcribe_note_recording", { noteId, force });
 }
 
 /**
