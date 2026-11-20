@@ -460,6 +460,14 @@ export default function HistoryPage({
                       </button>
                     )}
                     <span className="history-action-spacer" />
+                    {/* 笔记历史行的主入口是「打开笔记」，给它文字标签：
+                        13px 图标放在图标群里，用户根本认不出是哪个。 */}
+                    {isNoteRecord && (
+                      <button className="history-text-action" data-emphasis="true" disabled={isWorking} title={t("historyPage.openNoteHint")} onClick={() => void openNote(record)}>
+                        <ExternalLink size={12} />
+                        {t("historyPage.openNote")}
+                      </button>
+                    )}
                     {canReprocess && (
                       <button className="icon-btn icon-btn-sm" disabled={isWorking || (!record.text && !record.originalText)} title={t("historyPage.reprocessPolish")} aria-label={t("historyPage.reprocessPolish")} onClick={() => void reprocess(record, "polish")}>
                         {isWorking ? <RefreshCw className="history-spin" size={13} /> : <Sparkles size={13} />}
@@ -473,11 +481,6 @@ export default function HistoryPage({
                     {record.audioAvailable && (
                       <button className="icon-btn icon-btn-sm" title={t("historyPage.openAudioFolder")} aria-label={t("historyPage.openAudioFolder")} onClick={() => void revealAudio(record)}>
                         <FolderOpen size={13} />
-                      </button>
-                    )}
-                    {isNoteRecord && (
-                      <button className="icon-btn icon-btn-sm" disabled={isWorking} title={t("historyPage.openNote")} aria-label={t("historyPage.openNote")} onClick={() => void openNote(record)}>
-                        <ExternalLink size={13} />
                       </button>
                     )}
                     {canSaveAsNote && (

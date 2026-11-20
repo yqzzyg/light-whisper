@@ -819,6 +819,16 @@
   font-size: var(--text-2xs);
 }
 
+/* 笔记历史行的「打开笔记」是这类记录唯一有价值的动作，比「查看详情」显眼一档。 */
+.history-text-action[data-emphasis="true"] {
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.history-text-action[data-emphasis="true"]:hover {
+  color: var(--color-text-primary);
+}
+
 .history-action-spacer {
   flex: 1;
 }

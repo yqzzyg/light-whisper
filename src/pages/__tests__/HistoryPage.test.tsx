@@ -16,6 +16,10 @@ const api = vi.hoisted(() => ({
   createNoteFromHistory: vi.fn(),
   listNoteFolders: vi.fn(),
   listNotes: vi.fn(),
+  // 「打开笔记」走 notesStore::openNoteByHistory
+  findNoteByHistory: vi.fn(),
+  getNote: vi.fn(),
+  listNoteRecordings: vi.fn(),
 }));
 
 const event = vi.hoisted(() => ({ listen: vi.fn() }));
@@ -70,6 +74,11 @@ vi.mock("react-i18next", () => ({
       "historyPage.saveToNotes": "存为笔记",
       "historyPage.saveToNotesDone": "已存为笔记，可在左侧「笔记」中查看",
       "historyPage.saveToNotesFailed": `存为笔记失败：${options?.error ?? ""}`,
+      "historyPage.openNote": "打开笔记",
+      "historyPage.openNoteHint": "打开这条记录所属的笔记",
+      "historyPage.openNoteMissing": "对应的笔记已被删除",
+      "historyPage.openNoteFailed": `打开笔记失败：${options?.error ?? ""}`,
+      "historyPage.audioInNote": "这条记录由笔记转写生成，录音保存在笔记里。",
       "historyPage.reprocessPolish": "使用当前模型重新润色",
       "historyPage.searchPlaceholder": "搜索文本、应用或窗口…",
       "historyPage.showDetails": "查看详情",
@@ -132,6 +141,9 @@ beforeEach(() => {
   api.listNoteFolders.mockResolvedValue([]);
   api.listNotes.mockResolvedValue({ items: [], total: 0, hasMore: false });
   api.createNoteFromHistory.mockResolvedValue({ id: 9, folderId: null });
+  api.findNoteByHistory.mockResolvedValue(null);
+  api.getNote.mockResolvedValue(null);
+  api.listNoteRecordings.mockResolvedValue([]);
 });
 
 describe("HistoryPage", () => {
@@ -483,6 +495,48 @@ describe("HistoryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "存为笔记" }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("opens the note behind a note-mode record and hides the duplicate save action", async () => {
+    const noteRecord = {
+      ...record,
+      id: 11,
+      mode: "note" as const,
+      workflow: "note" as const,
+      audioAvailable: false,
+      appProcess: null,
+      appWindowTitle: null,
+      appRuleName: null,
+    };
+    api.listTranscriptionHistory.mockResolvedValue({ items: [noteRecord], total: 1, hasMore: false });
+    api.findNoteByHistory.mockResolvedValue(5);
+    const onNavigate = vi.fn();
+    render(<HistoryPage onNavigate={onNavigate} />);
+    await screen.findByText(noteRecord.text);
+
+    // 笔记历史行不能再给「存为笔记」：转录本就属于某条笔记，再存会造重复笔记。
+    expect(screen.queryByRole("button", { name: "存为笔记" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /打开笔记/ }));
+
+    await waitFor(() => expect(api.findNoteByHistory).toHaveBeenCalledWith(11));
+    await waitFor(() => expect(onNavigate).toHaveBeenCalledWith("notes"));
+  });
+
+  it("stays on the history page when the note behind the record is gone", async () => {
+    api.listTranscriptionHistory.mockResolvedValue({
+      items: [{ ...record, id: 11, mode: "note" as const, workflow: "note" as const, audioAvailable: false }],
+      total: 1,
+      hasMore: false,
+    });
+    const onNavigate = vi.fn();
+    render(<HistoryPage onNavigate={onNavigate} />);
+    await screen.findByText("润色后的最终文本");
+
+    fireEvent.click(screen.getByRole("button", { name: /打开笔记/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("对应的笔记已被删除"));
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
