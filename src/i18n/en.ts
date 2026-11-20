@@ -207,6 +207,8 @@ const en: TranslationSchema = {
     audioInNote: "Created by transcribing a note — the recording lives in that note.",
     openNote: "Open note",
     openNoteHint: "Open the note this record belongs to — the recording and edits live there",
+    openNoteConvertedHint: "Open the note made from this record; the audio stays here",
+    inNote: "Saved to a note",
     openNoteMissing: "That note has been deleted",
     openNoteFailed: "Failed to open note: {{error}}",
     allStatuses: "All statuses",

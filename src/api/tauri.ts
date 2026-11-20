@@ -12,6 +12,7 @@ import type {
   AppUpdateInfo,
   AiModelListPayload,
   FunASRStatus,
+  HistoryNoteLink,
   HotkeyDiagnostic,
   InputDeviceListPayload,
   JevProvider,
@@ -813,6 +814,15 @@ export function createNoteFromHistory(
 /** 历史记录反查笔记 id；`null` 表示对应笔记已被删除。 */
 export function findNoteByHistory(historyId: number): Promise<number | null> {
   return invokeCommand<number | null>("find_note_by_history", { historyId });
+}
+
+/**
+ * 批量反查：整页历史行一次问完哪些已经有笔记。
+ *
+ * 列表要按「有没有笔记」决定按钮，逐条调用会变成一页 50 次 IPC。
+ */
+export function findNotesByHistory(historyIds: number[]): Promise<HistoryNoteLink[]> {
+  return invokeCommand<HistoryNoteLink[]>("find_notes_by_history", { historyIds });
 }
 
 /** 列出一条笔记的所有录音段，按录音时间正序。 */

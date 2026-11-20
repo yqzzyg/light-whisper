@@ -27,6 +27,7 @@ import {
   copyToClipboard,
   deleteTranscriptionHistory,
   exportTranscriptionHistory,
+  findNotesByHistory,
   getTranscriptionHistoryStats,
   hideMainWindow,
   listTranscriptionHistory,
@@ -84,6 +85,8 @@ export default function HistoryPage({
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [workingId, setWorkingId] = useState<number | null>(null);
   const [removingId, setRemovingId] = useState<number | null>(null);
+  /** 已转成笔记的历史行：`record.id → note.id`，用于显示「打开笔记」。 */
+  const [noteLinks, setNoteLinks] = useState<Record<number, number>>({});
   const deletionInProgress = useRef(false);
   const [exportFormat, setExportFormat] = useState<"json" | "markdown">("markdown");
   const requestId = useRef(0);
@@ -107,6 +110,30 @@ export default function HistoryPage({
     }
   }, []);
 
+  /**
+   * 补上「这行历史属于哪条笔记」。
+   *
+   * 上传、听写这类记录转成笔记后 `mode` 仍是原模式，光看记录本身认不出它已有
+   * 笔记；不补这一步，用户只能看到一个「存为笔记」图标，点下去却发现笔记早就
+   * 有了。整页一次批量反查，顺带把已删笔记的旧映射清掉。
+   */
+  const loadNoteLinks = useCallback(async (ids: number[], request: number) => {
+    if (ids.length === 0) return;
+    try {
+      const links = await findNotesByHistory(ids);
+      if (request !== requestId.current) return;
+      setNoteLinks((previous) => {
+        const next = { ...previous };
+        for (const id of ids) delete next[id];
+        for (const link of links) next[link.historyId] = link.noteId;
+        return next;
+      });
+    } catch (error) {
+      // 反查失败只影响「打开笔记」入口，不该把整个历史列表打成加载失败。
+      console.error("Failed to look up notes for history:", error);
+    }
+  }, []);
+
   const load = useCallback(async (reset: boolean) => {
     const currentRequest = ++requestId.current;
     const offset = reset ? 0 : itemCount.current;
@@ -124,13 +151,14 @@ export default function HistoryPage({
       setItems((previous) => reset ? page.items : [...previous, ...page.items]);
       setTotal(page.total);
       setHasMore(page.hasMore);
+      void loadNoteLinks(page.items.map((item) => item.id), currentRequest);
     } catch (error) {
       if (currentRequest !== requestId.current) return;
       setLoadError(errorMessage(error));
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
     }
-  }, [mode, query, status]);
+  }, [loadNoteLinks, mode, query, status]);
   const loadRef = useRef(load);
 
   useEffect(() => {
@@ -218,7 +246,8 @@ export default function HistoryPage({
     if (workingId != null) return;
     setWorkingId(record.id);
     try {
-      await createNoteFromHistory(record.id);
+      const note = await createNoteFromHistory(record.id);
+      setNoteLinks((previous) => ({ ...previous, [record.id]: note.id }));
       toast.success(t("historyPage.saveToNotesDone"));
       onNavigate("notes");
     } catch (error) {
@@ -393,7 +422,11 @@ export default function HistoryPage({
               const canReprocess = record.workflow === "dictation";
               // 笔记转写写的历史行不再提供「存为笔记」：转录本来就属于某条笔记，
               // 再存一次会造出一条重复笔记。这类记录给的是「打开笔记」。
-              const isNoteRecord = record.mode === "note";
+              // 上传/听写转成的笔记一样要给这个入口——它的 mode 不会变，
+              // 只能靠反查结果判断，否则用户找不到已经建好的那条笔记。
+              const noteId = noteLinks[record.id];
+              const isNoteRecord = record.mode === "note" || noteId != null;
+              const convertedToNote = noteId != null && record.mode !== "note";
               const canSaveAsNote = !failed && !!record.text && !isNoteRecord;
               return (
                 <div className="history-record-motion" data-removing={removingId === record.id} key={record.id}>
@@ -407,6 +440,7 @@ export default function HistoryPage({
                     </div>
                     <div className="history-card-flags">
                       {record.reprocessedFromId != null && <span>{t("historyPage.reprocessed")}</span>}
+                      {convertedToNote && <span>{t("historyPage.inNote")}</span>}
                       {record.audioAvailable && <span title={t("historyPage.audioSaved")}><FileAudio size={11} /></span>}
                     </div>
                   </header>
@@ -463,7 +497,7 @@ export default function HistoryPage({
                     {/* 笔记历史行的主入口是「打开笔记」，给它文字标签：
                         13px 图标放在图标群里，用户根本认不出是哪个。 */}
                     {isNoteRecord && (
-                      <button className="history-text-action" data-emphasis="true" disabled={isWorking} title={t("historyPage.openNoteHint")} onClick={() => void openNote(record)}>
+                      <button className="history-text-action" data-emphasis="true" disabled={isWorking} title={t(convertedToNote ? "historyPage.openNoteConvertedHint" : "historyPage.openNoteHint")} onClick={() => void openNote(record)}>
                         <ExternalLink size={12} />
                         {t("historyPage.openNote")}
                       </button>

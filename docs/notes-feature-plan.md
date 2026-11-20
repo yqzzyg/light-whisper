@@ -486,7 +486,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 
 - **反查走两条路**：`notes.history_id`（历史 → 存为笔记）与 `note_recordings.history_id`（会议录音的段）。少一条就有一半历史行点不动。
 - **笔记已删时返回 `None`**，前端提示「对应的笔记已被删除」，不跳空白页。
-- **笔记转写的历史行不再提供「存为笔记」**：转录本来属于某条笔记，再存会造重复笔记；这类记录给的是「打开笔记」。
+- **不能只看 `record.mode`**：上传/听写记录「存为笔记」后 `mode` 不变（仍是 `import`/`dictation`），历史上线时只按 `mode === "note"` 判断，导致用户转完笔记后找不到入口。现在列表加载后调 `find_notes_by_history(ids)` **整页一次批量反查**（`Vec<(history_id, note_id)>`，顺序跟入参），有笔记的行显示「打开笔记」+「已转为笔记」，并撤掉「存为笔记」；逐条反查会让 50 张卡片发 50 次 IPC。
 - **重新转写 = 显式 `force`**：不传时保持原幂等（只转空段）。传 `true` 则全部重跑覆盖；没有录音段的笔记（转录来自历史）直接报错说明原因。
 - **历史行就地更新**（`history_service::update_transcription_result`）：同一段录音重转 N 次不该堆 N 条重复历史。段表的 `history_id` 只能指向最新一条，旧行在历史页会变成「笔记已删除」的死链。单段重转同样改为就地更新。
 

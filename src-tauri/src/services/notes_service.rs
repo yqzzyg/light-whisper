@@ -837,6 +837,75 @@ fn find_note_id_by_history_with_connection(
         .map_err(|error| format!("反查笔记失败: {error}"))
 }
 
+/// 批量版反查：历史列表一次带上整页 id，返回「历史行 → 笔记」的映射。
+///
+/// 逐条反查会让每张卡片发一次 IPC、开一次库，一页 50 条就是 50 次往返；这里一次
+/// 查完。判定顺序与单条版一致：先看 `notes.history_id`（存为笔记），再看
+/// `note_recordings.history_id`（会议录音的段）。
+fn find_note_ids_by_history_with_connection(
+    connection: &Connection,
+    history_ids: &[i64],
+) -> Result<Vec<(i64, i64)>, String> {
+    let mut links: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    // SQLite 一条语句的变量上限是 999；一页 50 条远不到，但调用方可能一次传更多。
+    for chunk in history_ids.chunks(500) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!("SELECT history_id, id FROM notes WHERE history_id IN ({placeholders})");
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("准备反查笔记失败: {error}"))?;
+        let rows = statement
+            .query_map(params_from_iter(chunk.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| format!("反查笔记失败: {error}"))?;
+        for row in rows {
+            let (history_id, note_id) =
+                row.map_err(|error| format!("解析反查结果失败: {error}"))?;
+            links.insert(history_id, note_id);
+        }
+    }
+
+    // 只有前者没命中的才看段表：两处都有时优先「存为笔记」的那条。
+    let missing: Vec<i64> = history_ids
+        .iter()
+        .copied()
+        .filter(|id| !links.contains_key(id))
+        .collect();
+    for chunk in missing.chunks(500) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT history_id, note_id FROM note_recordings \
+             WHERE history_id IN ({placeholders}) ORDER BY id"
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("准备反查笔记录音段失败: {error}"))?;
+        let rows = statement
+            .query_map(params_from_iter(chunk.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| format!("反查笔记录音段失败: {error}"))?;
+        for row in rows {
+            let (history_id, note_id) =
+                row.map_err(|error| format!("解析反查结果失败: {error}"))?;
+            links.entry(history_id).or_insert(note_id);
+        }
+    }
+
+    // 顺序跟调用方传进来的 id 一致，前端合并结果时不用再排。
+    Ok(history_ids
+        .iter()
+        .filter_map(|id| links.get(id).map(|note_id| (*id, *note_id)))
+        .collect())
+}
+
 fn recording_from_row(row: &Row<'_>) -> rusqlite::Result<NoteRecording> {
     Ok(NoteRecording {
         id: row.get(0)?,
@@ -1115,6 +1184,19 @@ pub async fn find_note_id_by_history(history_id: i64) -> Result<Option<i64>, Str
     tokio::task::spawn_blocking(move || {
         let connection = open_connection()?;
         find_note_id_by_history_with_connection(&connection, history_id)
+    })
+    .await
+    .map_err(|error| format!("反查笔记任务失败: {error}"))?
+}
+
+/// 批量反查历史行对应的笔记 id，供历史列表一次性补上「打开笔记」入口。
+///
+/// 返回 `Vec<(history_id, note_id)>`，只包含确实有笔记的行；顺序与入参一致。
+pub async fn find_note_ids_by_history(history_ids: Vec<i64>) -> Result<Vec<(i64, i64)>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = open_connection()?;
+        find_note_ids_by_history_with_connection(&connection, &history_ids)
     })
     .await
     .map_err(|error| format!("反查笔记任务失败: {error}"))?
@@ -1411,6 +1493,37 @@ mod tests {
             find_note_id_by_history_with_connection(&connection, 12345).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn history_batch_lookup_matches_single_lookup_and_keeps_order() {
+        let connection = memory_connection();
+        let (imported, _) = create_note_from_transcript_with_connection(
+            &connection,
+            None,
+            "导入的笔记",
+            "import",
+            "转录内容",
+            None,
+            7,
+        )
+        .unwrap();
+        let meeting = insert_note_with_connection(&connection, None, "周会", "meeting").unwrap();
+        let segment = add_recording_with_connection(&connection, meeting.id, "a.wav", None)
+            .unwrap()
+            .unwrap();
+        set_recording_transcript_with_connection(&connection, segment.id, "第一段", Some(99))
+            .unwrap();
+
+        // 顺序跟入参走，且只返回真正有笔记的行（12345 没有笔记）。
+        assert_eq!(
+            find_note_ids_by_history_with_connection(&connection, &[7, 12345, 99]).unwrap(),
+            vec![(7, imported.id), (99, meeting.id)]
+        );
+        // 空入参不报错：历史列表可能一次都没渲染，前端也会无条件调一次。
+        assert!(find_note_ids_by_history_with_connection(&connection, &[])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

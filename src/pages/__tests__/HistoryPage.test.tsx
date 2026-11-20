@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   listNotes: vi.fn(),
   // 「打开笔记」走 notesStore::openNoteByHistory
   findNoteByHistory: vi.fn(),
+  findNotesByHistory: vi.fn(),
   getNote: vi.fn(),
   listNoteRecordings: vi.fn(),
 }));
@@ -76,6 +77,8 @@ vi.mock("react-i18next", () => ({
       "historyPage.saveToNotesFailed": `存为笔记失败：${options?.error ?? ""}`,
       "historyPage.openNote": "打开笔记",
       "historyPage.openNoteHint": "打开这条记录所属的笔记",
+      "historyPage.openNoteConvertedHint": "打开这条记录转成的笔记",
+      "historyPage.inNote": "已转为笔记",
       "historyPage.openNoteMissing": "对应的笔记已被删除",
       "historyPage.openNoteFailed": `打开笔记失败：${options?.error ?? ""}`,
       "historyPage.audioInNote": "这条记录由笔记转写生成，录音保存在笔记里。",
@@ -142,6 +145,7 @@ beforeEach(() => {
   api.listNotes.mockResolvedValue({ items: [], total: 0, hasMore: false });
   api.createNoteFromHistory.mockResolvedValue({ id: 9, folderId: null });
   api.findNoteByHistory.mockResolvedValue(null);
+  api.findNotesByHistory.mockResolvedValue([]);
   api.getNote.mockResolvedValue(null);
   api.listNoteRecordings.mockResolvedValue([]);
 });
@@ -538,6 +542,30 @@ describe("HistoryPage", () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("对应的笔记已被删除"));
     expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("offers 打开笔记 for an upload that was already turned into a note", async () => {
+    // 上传转笔记后 mode 仍是 import：只看 mode 的话用户找不到已经建好的笔记。
+    api.listTranscriptionHistory.mockResolvedValue({
+      items: [{ ...record, id: 21, mode: "import" as const, workflow: "import" as const }],
+      total: 1,
+      hasMore: false,
+    });
+    api.findNotesByHistory.mockResolvedValue([{ historyId: 21, noteId: 8 }]);
+    api.findNoteByHistory.mockResolvedValue(8);
+    const onNavigate = vi.fn();
+    render(<HistoryPage onNavigate={onNavigate} />);
+    await screen.findByText("润色后的最终文本");
+
+    await waitFor(() => expect(api.findNotesByHistory).toHaveBeenCalledWith([21]));
+    // 已经转过的记录不再给「存为笔记」：点了只会返回同一条笔记，白让用户困惑。
+    await waitFor(() => expect(screen.queryByRole("button", { name: "存为笔记" })).toBeNull());
+    expect(screen.getByText("已转为笔记")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /打开笔记/ }));
+
+    await waitFor(() => expect(api.findNoteByHistory).toHaveBeenCalledWith(21));
+    await waitFor(() => expect(onNavigate).toHaveBeenCalledWith("notes"));
   });
 
   it("shows both the edit instruction and selected source text", async () => {

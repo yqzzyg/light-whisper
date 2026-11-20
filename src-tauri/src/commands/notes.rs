@@ -223,6 +223,29 @@ pub async fn find_note_by_history(history_id: i64) -> Result<Option<i64>, String
     notes_service::find_note_id_by_history(history_id).await
 }
 
+/// 历史行 → 笔记的批量映射，供历史列表一次性决定哪些卡片显示「打开笔记」。
+///
+/// 单条 `find_note_by_history` 只适合点按钮时用；列表渲染要一次拿到整页结果，
+/// 否则 50 张卡片就是 50 次往返。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryNoteLink {
+    pub history_id: i64,
+    pub note_id: i64,
+}
+
+#[tauri::command]
+pub async fn find_notes_by_history(history_ids: Vec<i64>) -> Result<Vec<HistoryNoteLink>, String> {
+    Ok(notes_service::find_note_ids_by_history(history_ids)
+        .await?
+        .into_iter()
+        .map(|(history_id, note_id)| HistoryNoteLink {
+            history_id,
+            note_id,
+        })
+        .collect())
+}
+
 /// 只保留最后一段文件名，挡住前端拼出来的路径分隔符与空名。
 fn sanitize_file_name(raw: &str) -> Result<String, String> {
     let name = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();

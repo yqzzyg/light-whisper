@@ -335,6 +335,12 @@ export interface PersistentHistoryPage {
   hasMore: boolean;
 }
 
+/** 历史行 → 笔记的反查结果，供历史列表决定哪张卡片显示「打开笔记」。 */
+export interface HistoryNoteLink {
+  historyId: number;
+  noteId: number;
+}
+
 export interface LatencyStats {
   p50Ms?: number | null;
   p95Ms?: number | null;

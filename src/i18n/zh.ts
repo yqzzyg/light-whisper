@@ -204,6 +204,8 @@ const zh = {
     audioInNote: "这条记录由笔记转写生成，录音保存在笔记里。",
     openNote: "打开笔记",
     openNoteHint: "打开这条记录所属的笔记，去那里听录音、继续编辑",
+    openNoteConvertedHint: "打开这条记录转成的笔记；录音仍留在历史记录里",
+    inNote: "已转为笔记",
     openNoteMissing: "对应的笔记已被删除",
     openNoteFailed: "打开笔记失败：{{error}}",
     allStatuses: "全部状态",
