@@ -231,7 +231,10 @@ pub async fn start(
         Err(error) => return Err(format!("启动麦克风失败: {error}")),
     };
 
-    let writer = match WavAppender::create(&path, sample_rate) {
+    // 头部必须声明**重采样之后**的采样率：`drain_samples` 一律把采集数据转成
+    // `TARGET_SAMPLE_RATE` 再追加，若这里写采集侧原始率（设备不支持 16k 时是
+    // 48k），文件会被当成 3 倍慢速音频——时长算错、转写音调全错。
+    let writer = match WavAppender::create(&path, super::audio_service::TARGET_SAMPLE_RATE) {
         Ok(writer) => writer,
         Err(error) => {
             stop_flag.store(true, Ordering::Release);
