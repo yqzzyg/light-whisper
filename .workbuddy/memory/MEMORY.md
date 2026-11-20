@@ -27,6 +27,7 @@
 ## 工程约定
 
 - 二进制名由 Cargo `package.name` 决定（dev 与打包都是 `minutes.exe`）；`mainBinaryName` 默认 null，**不要加**（官方建议改 package name）。
+- **文档目录约定**：`docs/` 根目录放源码自带的既有技术文档（`r2t2-native.md`、`privacy.md`、`development.md` 等，不要动）；**新写的方案文档一律放 `docs/neo/`**。
 - 新 Tauri 命令须同步登记 `formal/verification.json`（commands / command_implementation / contracts evidence），否则 `scripts/check_formal.py` 失败。
 - 数据库层测试按既有惯例写 `*_with_connection` 变体，用内存库单测。
 - **只有一个库文件 `minutes.sqlite3`**（`src/db.rs`）：历史与笔记同库不同表，代码边界仍由 `history_service` / `notes_service` 承担。

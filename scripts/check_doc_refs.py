@@ -1,4 +1,4 @@
-"""校验 docs/notes-feature-plan.md 里引用的 Rust 文件与符号是否真实存在。
+"""校验 docs/neo/notes-feature-plan.md 里引用的 Rust 文件与符号是否真实存在。
 
 文档里的引用写错不会让编译失败，但会误导读者。先前的 `wav_writer.rs` 路径
 与 `history_service.rs:810` 这类行号就是这样失准的，所以定期跑一遍。
@@ -10,7 +10,7 @@ import os
 import re
 import sys
 
-DOC = "docs/notes-feature-plan.md"
+DOC = "docs/neo/notes-feature-plan.md"
 
 
 def main() -> int:
