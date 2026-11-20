@@ -85,8 +85,8 @@ export default function HistoryPage({
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [workingId, setWorkingId] = useState<number | null>(null);
   const [removingId, setRemovingId] = useState<number | null>(null);
-  /** 已转成笔记的历史行：`record.id → note.id`，用于显示「打开笔记」。 */
-  const [noteLinks, setNoteLinks] = useState<Record<number, number>>({});
+  /** 反查结果：`record.id → note.id`，`null` 表示查过、确实没有笔记。 */
+  const [noteLookup, setNoteLookup] = useState<Record<number, number | null>>({});
   const deletionInProgress = useRef(false);
   const [exportFormat, setExportFormat] = useState<"json" | "markdown">("markdown");
   const requestId = useRef(0);
@@ -116,15 +116,19 @@ export default function HistoryPage({
    * 上传、听写这类记录转成笔记后 `mode` 仍是原模式，光看记录本身认不出它已有
    * 笔记；不补这一步，用户只能看到一个「存为笔记」图标，点下去却发现笔记早就
    * 有了。整页一次批量反查，顺带把已删笔记的旧映射清掉。
+   *
+   * 查过的行一律写进 `noteLookup`（没笔记写 `null`），渲染时以库为准：`mode`
+   * 只用作「查询还没回来」时的兜底，否则笔记删掉后 `mode="note"` 会永远占着
+   * 「打开笔记」，那一行就再也没有转成笔记的入口了。
    */
   const loadNoteLinks = useCallback(async (ids: number[], request: number) => {
     if (ids.length === 0) return;
     try {
       const links = await findNotesByHistory(ids);
       if (request !== requestId.current) return;
-      setNoteLinks((previous) => {
+      setNoteLookup((previous) => {
         const next = { ...previous };
-        for (const id of ids) delete next[id];
+        for (const id of ids) next[id] = null;
         for (const link of links) next[link.historyId] = link.noteId;
         return next;
       });
@@ -247,7 +251,7 @@ export default function HistoryPage({
     setWorkingId(record.id);
     try {
       const note = await createNoteFromHistory(record.id);
-      setNoteLinks((previous) => ({ ...previous, [record.id]: note.id }));
+      setNoteLookup((previous) => ({ ...previous, [record.id]: note.id }));
       toast.success(t("historyPage.saveToNotesDone"));
       onNavigate("notes");
     } catch (error) {
@@ -268,6 +272,10 @@ export default function HistoryPage({
     try {
       const noteId = await openNoteByHistory(record.id);
       if (noteId == null) {
+        // 笔记在别处被删了：立刻把这一行改回「没有笔记」，卡片当场出现
+        // 「存为笔记」。否则「打开笔记」会一直占着位置，用户再也没法把这条
+        // 转录重新转成笔记——正是「删了笔记想再转一次却没有按钮」的成因。
+        setNoteLookup((previous) => ({ ...previous, [record.id]: null }));
         toast.error(t("historyPage.openNoteMissing"));
         return;
       }
@@ -424,8 +432,11 @@ export default function HistoryPage({
               // 再存一次会造出一条重复笔记。这类记录给的是「打开笔记」。
               // 上传/听写转成的笔记一样要给这个入口——它的 mode 不会变，
               // 只能靠反查结果判断，否则用户找不到已经建好的那条笔记。
-              const noteId = noteLinks[record.id];
-              const isNoteRecord = record.mode === "note" || noteId != null;
+              // 反过来，反查说「没有笔记」时以库为准：笔记被删掉后那一行必须
+              // 重新能转成笔记，否则 `mode="note"` 会把它永久锁成死行。
+              const looked = Object.prototype.hasOwnProperty.call(noteLookup, record.id);
+              const noteId = noteLookup[record.id] ?? null;
+              const isNoteRecord = noteId != null || (record.mode === "note" && !looked);
               const convertedToNote = noteId != null && record.mode !== "note";
               const canSaveAsNote = !failed && !!record.text && !isNoteRecord;
               return (

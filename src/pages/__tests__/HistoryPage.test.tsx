@@ -514,6 +514,7 @@ describe("HistoryPage", () => {
       appRuleName: null,
     };
     api.listTranscriptionHistory.mockResolvedValue({ items: [noteRecord], total: 1, hasMore: false });
+    api.findNotesByHistory.mockResolvedValue([{ historyId: 11, noteId: 5 }]);
     api.findNoteByHistory.mockResolvedValue(5);
     const onNavigate = vi.fn();
     render(<HistoryPage onNavigate={onNavigate} />);
@@ -528,20 +529,42 @@ describe("HistoryPage", () => {
     await waitFor(() => expect(onNavigate).toHaveBeenCalledWith("notes"));
   });
 
-  it("stays on the history page when the note behind the record is gone", async () => {
+  it("turns a note-mode row back into a convertible record once its note is gone", async () => {
+    // 笔记删掉后 mode 仍是 note。若继续拿 mode 当事实，「打开笔记」会永远占位，
+    // 这条转录就再没有转成笔记的入口——正是用户反馈的死胡同。
     api.listTranscriptionHistory.mockResolvedValue({
       items: [{ ...record, id: 11, mode: "note" as const, workflow: "note" as const, audioAvailable: false }],
       total: 1,
       hasMore: false,
     });
+    api.findNotesByHistory.mockResolvedValue([]);
+    render(<HistoryPage onNavigate={vi.fn()} />);
+    await screen.findByText("润色后的最终文本");
+
+    await waitFor(() => expect(api.findNotesByHistory).toHaveBeenCalledWith([11]));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /打开笔记/ })).toBeNull());
+    expect(screen.getByRole("button", { name: "存为笔记" })).toBeTruthy();
+  });
+
+  it("recovers the convert action after the linked note was deleted elsewhere", async () => {
+    // 反查说「有笔记」，点进去却发现笔记已被删：这一行要当场变回可转状态。
+    api.listTranscriptionHistory.mockResolvedValue({
+      items: [{ ...record, id: 21, mode: "import" as const, workflow: "import" as const }],
+      total: 1,
+      hasMore: false,
+    });
+    api.findNotesByHistory.mockResolvedValue([{ historyId: 21, noteId: 8 }]);
+    api.findNoteByHistory.mockResolvedValue(null);
     const onNavigate = vi.fn();
     render(<HistoryPage onNavigate={onNavigate} />);
     await screen.findByText("润色后的最终文本");
 
-    fireEvent.click(screen.getByRole("button", { name: /打开笔记/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /打开笔记/ }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("对应的笔记已被删除"));
     expect(onNavigate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /打开笔记/ })).toBeNull());
+    expect(screen.getByRole("button", { name: "存为笔记" })).toBeTruthy();
   });
 
   it("offers 打开笔记 for an upload that was already turned into a note", async () => {
