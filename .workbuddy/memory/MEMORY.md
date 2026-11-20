@@ -29,6 +29,10 @@
 - 二进制名由 Cargo `package.name` 决定（dev 与打包都是 `minutes.exe`）；`mainBinaryName` 默认 null，**不要加**（官方建议改 package name）。
 - 新 Tauri 命令须同步登记 `formal/verification.json`（commands / command_implementation / contracts evidence），否则 `scripts/check_formal.py` 失败。
 - 数据库层测试按既有惯例写 `*_with_connection` 变体，用内存库单测。
+- **只有一个库文件 `minutes.sqlite3`**（`src/db.rs`）：历史与笔记同库不同表，代码边界仍由 `history_service` / `notes_service` 承担。schema 版本记在 `schema_meta(module, version)`，**不要再用 `PRAGMA user_version`**（单文件只有一个槽，两模块会互相覆盖）。
+- 模块版本推进一律走 `db::migrate_module`；`notes` 建表前必须先 `history_service::migrate_schema`，因为 `history_id` 外键的父表要先存在（SQLite 建表时就校验），两步各自开事务、不能嵌套。
+- 本项目 rusqlite `bundled` 构建 `SQLITE_DEFAULT_FOREIGN_KEYS` 默认是 1（外键一直生效），但 `db::configure` 仍显式 `PRAGMA foreign_keys = ON`，不要依赖编译期默认值。
+- 笔记侧 `history_id` 都是真外键 `REFERENCES transcription_history(id) ON DELETE SET NULL`：历史被保留期淘汰只断引用，笔记不受影响；删笔记不删历史（审计日志）。
 - 音频目录两套、生命周期不同：`history_audio/`（历史，有租约与 GC）与 `notes_audio/`（笔记，按 note.audio_file 引用回收）。路径解析一律走 `paths::safe_file_in_dir`。
 - 会议录音（`note_recording_service`）只落盘不转写，落盘间隔 500ms；录音期间**不应出现 ASR 子进程**，这是「先录后转省电」的验收点。
 - 会议录音与听写共用麦克风，互斥只做单向（会议录音开始前查听写），不要在听写热键链路里加反向检查。

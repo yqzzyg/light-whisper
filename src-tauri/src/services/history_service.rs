@@ -5,9 +5,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 
+use crate::db;
 use crate::utils::paths;
 
-const HISTORY_DB_FILE: &str = "transcription_history.sqlite3";
 const HISTORY_AUDIO_DIR: &str = "history_audio";
 const MAX_PAGE_SIZE: u32 = 200;
 const HISTORY_SCHEMA_VERSION: i64 = 2;
@@ -136,10 +136,6 @@ fn now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn history_db_path() -> PathBuf {
-    paths::get_data_dir().join(HISTORY_DB_FILE)
-}
-
 fn history_audio_dir() -> PathBuf {
     paths::get_data_dir().join(HISTORY_AUDIO_DIR)
 }
@@ -148,28 +144,11 @@ fn safe_audio_path(file_name: &str) -> Option<PathBuf> {
     paths::safe_file_in_dir(&history_audio_dir(), file_name)
 }
 
-fn open_connection() -> Result<Connection, String> {
-    std::fs::create_dir_all(paths::get_data_dir())
-        .map_err(|error| format!("创建历史数据目录失败: {error}"))?;
-    let connection = Connection::open(history_db_path())
-        .map_err(|error| format!("打开历史数据库失败: {error}"))?;
-    configure_runtime_connection(&connection)?;
-    Ok(connection)
-}
-
+/// 内存库测试用的组合配置。生产路径由 `db::open` 一次配好并迁移。
+#[cfg(test)]
 fn configure_connection(connection: &Connection) -> Result<(), String> {
-    configure_runtime_connection(connection)?;
+    db::configure(connection)?;
     migrate_schema(connection)
-}
-
-fn configure_runtime_connection(connection: &Connection) -> Result<(), String> {
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| format!("设置历史数据库等待时间失败: {error}"))?;
-    connection
-        .execute_batch("PRAGMA synchronous = NORMAL;")
-        .map_err(|error| format!("配置历史数据库连接失败: {error}"))?;
-    Ok(())
 }
 
 fn table_has_column(connection: &Connection, column_name: &str) -> Result<bool, String> {
@@ -188,28 +167,17 @@ fn table_has_column(connection: &Connection, column_name: &str) -> Result<bool, 
     Ok(false)
 }
 
-fn migrate_schema(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute_batch("PRAGMA journal_mode = WAL;")
-        .map_err(|error| format!("启用历史数据库 WAL 失败: {error}"))?;
-    let current_version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-        .map_err(|error| format!("读取历史数据库版本失败: {error}"))?;
-    if current_version > HISTORY_SCHEMA_VERSION {
-        return Err(format!(
-            "历史数据库版本 {current_version} 高于当前支持的 {HISTORY_SCHEMA_VERSION}"
-        ));
-    }
-    if current_version == HISTORY_SCHEMA_VERSION {
-        return Ok(());
-    }
-
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| format!("开始历史数据库迁移失败: {error}"))?;
-    transaction
-        .execute_batch(
-            r#"
+/// 建表并推进历史模块版本。`notes_service` 建 `notes` 表前要先调它：
+/// 笔记侧的 `history_id` 外键指向 `transcription_history`，父表必须先在。
+pub(crate) fn migrate_schema(connection: &Connection) -> Result<(), String> {
+    db::migrate_module(
+        connection,
+        "history",
+        HISTORY_SCHEMA_VERSION,
+        |transaction, _current| {
+            transaction
+                .execute_batch(
+                    r#"
             CREATE TABLE IF NOT EXISTS transcription_history (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id          INTEGER NOT NULL,
@@ -250,45 +218,42 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                 updated_at INTEGER NOT NULL
             );
             "#,
-        )
-        .map_err(|error| format!("初始化历史数据库失败: {error}"))?;
+                )
+                .map_err(|error| format!("初始化历史数据库失败: {error}"))?;
 
-    if !table_has_column(&transaction, "workflow")? {
-        transaction
+            if !table_has_column(transaction, "workflow")? {
+                transaction
             .execute(
                 "ALTER TABLE transcription_history ADD COLUMN workflow TEXT NOT NULL DEFAULT 'dictation'",
                 [],
             )
             .map_err(|error| format!("迁移历史处理类型失败: {error}"))?;
-    }
-    if !table_has_column(&transaction, "source_text")? {
-        transaction
-            .execute(
-                "ALTER TABLE transcription_history ADD COLUMN source_text TEXT",
-                [],
-            )
-            .map_err(|error| format!("迁移历史编辑原文失败: {error}"))?;
-    }
-    transaction
+            }
+            if !table_has_column(transaction, "source_text")? {
+                transaction
+                    .execute(
+                        "ALTER TABLE transcription_history ADD COLUMN source_text TEXT",
+                        [],
+                    )
+                    .map_err(|error| format!("迁移历史编辑原文失败: {error}"))?;
+            }
+            transaction
         .execute(
             "UPDATE transcription_history SET workflow = 'assistant' WHERE mode = 'assistant' AND workflow = 'dictation'",
             [],
         )
         .map_err(|error| format!("迁移助手历史处理类型失败: {error}"))?;
-    transaction
-        .pragma_update(None, "user_version", HISTORY_SCHEMA_VERSION)
-        .map_err(|error| format!("更新历史数据库版本失败: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("提交历史数据库迁移失败: {error}"))
+            Ok(())
+        },
+    )
 }
 
 pub async fn initialize() -> Result<(), String> {
     HISTORY_INITIALIZED
         .get_or_try_init(|| async {
             tokio::task::spawn_blocking(|| {
-                let connection = open_connection()?;
-                configure_connection(&connection)?;
+                let connection = db::open()?;
+                migrate_schema(&connection)?;
                 // 初始化完成前所有历史操作都会等待此 OnceCell，因此这里清理的
                 // 只能是上次进程崩溃遗留的租约和孤立音频。
                 connection
@@ -337,7 +302,7 @@ pub async fn audio_file_path(id: i64) -> Result<Option<PathBuf>, String> {
 }
 
 fn audio_file_path_blocking(id: i64) -> Result<Option<PathBuf>, String> {
-    let connection = open_connection()?;
+    let connection = db::open()?;
     let audio_file: Option<String> = connection
         .query_row(
             "SELECT audio_file FROM transcription_history WHERE id = ?1",
@@ -411,7 +376,7 @@ const HISTORY_COLUMNS: &str = r#"
 pub async fn insert(draft: HistoryDraft, retention_days: u32) -> Result<i64, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let mut connection = open_connection()?;
+        let mut connection = db::open()?;
         let now = now_millis();
         connection
             .execute(
@@ -465,7 +430,7 @@ pub async fn insert(draft: HistoryDraft, retention_days: u32) -> Result<i64, Str
 pub async fn get(id: i64) -> Result<Option<StoredHistoryRecord>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         connection
             .query_row(
                 &format!("SELECT {HISTORY_COLUMNS} FROM transcription_history WHERE id = ?1"),
@@ -522,7 +487,7 @@ fn get_for_reprocess_with_connection(
 pub async fn get_for_reprocess(id: i64) -> Result<Option<StoredHistoryRecord>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let mut connection = open_connection()?;
+        let mut connection = db::open()?;
         get_for_reprocess_with_connection(&mut connection, id)
     })
     .await
@@ -558,7 +523,7 @@ fn release_audio_lease_with_connection(
 pub async fn release_audio_lease(audio_file: String) -> Result<(), String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let mut connection = open_connection()?;
+        let mut connection = db::open()?;
         release_audio_lease_with_connection(&mut connection, &audio_file)
     })
     .await
@@ -568,7 +533,7 @@ pub async fn release_audio_lease(audio_file: String) -> Result<(), String> {
 pub async fn cleanup_audio_if_unreferenced(audio_file: String) -> Result<(), String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         cleanup_audio_if_unreferenced_with_connection(&connection, &audio_file);
         Ok(())
     })
@@ -579,7 +544,7 @@ pub async fn cleanup_audio_if_unreferenced(audio_file: String) -> Result<(), Str
 pub async fn list(query: HistoryQuery) -> Result<HistoryPage, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         let search = query.query.trim().to_string();
         let mode = query.mode.trim().to_string();
         let status = query.status.trim().to_string();
@@ -662,7 +627,7 @@ pub async fn stats() -> Result<HistoryStats, String> {
         let mut slot = STATS_CACHE.lock();
         if slot.is_none() {
             *slot = Some(StatsCache {
-                connection: open_connection()?,
+                connection: db::open()?,
                 value: None,
             });
         }
@@ -827,7 +792,7 @@ fn cleanup_orphan_audio_files_with_connection(connection: &Connection) {
 pub async fn delete(id: i64) -> Result<bool, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let mut connection = open_connection()?;
+        let mut connection = db::open()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("开始删除转写历史事务失败: {error}"))?;
@@ -863,7 +828,7 @@ pub async fn update_total_ms(id: i64, total_ms: u64) -> Result<bool, String> {
     let total_ms = i64::try_from(total_ms).map_err(|_| "历史总耗时超出可保存范围".to_string())?;
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         connection
             .execute(
                 "UPDATE transcription_history SET total_ms = ?2, updated_at = ?3 WHERE id = ?1",
@@ -895,7 +860,7 @@ pub async fn update_transcription_result(
     let engine = engine.to_string();
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         connection
             .execute(
                 "UPDATE transcription_history SET \
@@ -965,7 +930,7 @@ fn cleanup_expired_with_connection(
 pub async fn cleanup(retention_days: u32) -> Result<u64, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let mut connection = open_connection()?;
+        let mut connection = db::open()?;
         cleanup_expired_with_connection(&mut connection, retention_days)
     })
     .await
@@ -975,7 +940,7 @@ pub async fn cleanup(retention_days: u32) -> Result<u64, String> {
 pub async fn all_records() -> Result<Vec<HistoryRecord>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         let mut statement = connection
             .prepare(&format!(
                 "SELECT {HISTORY_COLUMNS} FROM transcription_history ORDER BY created_at DESC, id DESC"
@@ -1197,7 +1162,7 @@ mod tests {
         wav.write_sample(1_i16).unwrap();
         wav.finalize().unwrap();
 
-        let connection = super::open_connection().unwrap();
+        let connection = crate::db::open().unwrap();
         connection
             .execute(
                 "INSERT INTO transcription_history \
@@ -1275,7 +1240,7 @@ mod tests {
         std::fs::create_dir_all(audio_path.parent().unwrap()).unwrap();
         std::fs::write(&audio_path, b"wav").unwrap();
 
-        let connection = super::open_connection().unwrap();
+        let connection = crate::db::open().unwrap();
         connection
             .execute(
                 "INSERT INTO transcription_history \
@@ -1390,7 +1355,11 @@ mod tests {
         assert_eq!(workflow, "assistant");
         assert!(table_has_column(&connection, "source_text").expect("inspect source_text column"));
         let schema_version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .query_row(
+                "SELECT version FROM schema_meta WHERE module = 'history'",
+                [],
+                |row| row.get(0),
+            )
             .expect("read migrated schema version");
         assert_eq!(schema_version, HISTORY_SCHEMA_VERSION);
     }
@@ -1432,7 +1401,7 @@ mod async_ownership_replay_tests {
             return;
         }
         initialize().await.unwrap();
-        let connection = open_connection().unwrap();
+        let connection = db::open().unwrap();
         let mut row_ids = std::collections::HashMap::new();
         for audio in ["A", "B"] {
             let file = format!("formal-{audio}.wav");

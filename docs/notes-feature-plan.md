@@ -84,7 +84,7 @@ created_at, updated_at
 
 | 能力 | 位置 | 复用方式 |
 |---|---|---|
-| SQLite 迁移范式 | `services/history_service.rs:156-260`（WAL + `user_version` + 每次开连接） | 笔记库照抄这套：`notes.sqlite3`、独立 `NOTES_SCHEMA_VERSION` |
+| SQLite 迁移范式 | `src/db.rs`（WAL + `schema_meta(module, version)` + 每次开连接） | 笔记模块复用同一个文件与连接工厂，只推进自己的 `notes` 版本行（见 §3.2 变更说明；早期版本是独立 `notes.sqlite3`） |
 | 录音链路 | `commands/audio.rs:500 start_recording` / `:514 stop_recording`，`RecordingContext` 常驻根部 | **不能直接复用**：见下方「耦合点」 |
 | 流式转写 | `transcription-result` 事件（`interim` 标记 + `sessionId`） | 仅作为可选的实时模式，一期不用 |
 | 采集原语 | `audio_service::spawn_audio_capture_thread(stop_flag, samples, device)`（返回设备采样率） | **笔记录音直接用它**：只采集、不转写 |
@@ -106,7 +106,16 @@ created_at, updated_at
 
 **能力缺口**：录音只走 `cpal` 默认输入设备（`audio_service/capture.rs:209`），**没有系统声环回**（`wasapi` 已在 `Cargo.toml:91`，但未使用）。线上会议只能录到本机麦克风。
 
-### 3.2 数据模型（`notes.sqlite3`）
+### 3.2 数据模型（`minutes.sqlite3`）
+
+> **变更（架构调整）**：本节最初设计为独立的 `notes.sqlite3`，现已合并到与历史共用的
+> `minutes.sqlite3`。原因是一致性边界：「历史 → 存为笔记」和笔记转写都是跨模块写，拆两个文件
+> 时既没有事务也没有外键，删笔记后历史行会变成悬空指针。
+>
+> 现状：表与 schema 版本仍按模块划分（版本记在 `schema_meta(module, version)`，不再是
+> `PRAGMA user_version`），代码边界仍由 `history_service` / `notes_service` 承担。
+> `notes.history_id`、`note_recordings.history_id` 现在是指向 `transcription_history(id)`
+> 的真外键，`ON DELETE SET NULL`。原文关于音频独立目录 `notes_audio/` 的结论不变。
 
 ```sql
 CREATE TABLE note_folders (
@@ -511,7 +520,7 @@ notes_service::set_note_recording_transcript(recording_id, text, Some(history_id
 | 长转录摘要 | 无 token 计数器，只能按字符估算，可能超出模型窗口 | 用保守预算（12k 字符/块）+ 失败重试降块；错误提示要具体 |
 | 删除语义 | 一期无回收站，误删不可恢复 | 删除前二次确认；若加软删除，成本不高（`deleted_at` + 列表过滤） |
 | 摘要质量 | 本地小模型易丢数字与人名 | 沿用 openwhispr 已验证的提示（强调不得编造、保留专名与数字），并在 UI 标注「AI 生成，需核对」 |
-| 数据迁移 | 新库独立，不影响历史库 | 无需迁移；首次启动建库并种子目录 |
+| 数据迁移 | 与历史同库但表独立（原设计为独立新库，已按 §3.2 变更说明合并） | 无历史数据时不需迁移；老库文件由开发期直接丢弃 |
 | 笔记音频无人回收 | `notes_audio/` 不归历史 GC 管，删笔记/崩溃残留会越积越多（1 小时约 115MB） | 三处回收：删笔记删文件、删目录级联、启动扫未被 notes 引用的残留；配套单测 + 一个「磁盘占用」可见性（设置页显示目录大小，可选） |
 | 历史记录无音频 | 笔记转写写的历史行 `audio_file=NULL`，历史页播放按钮消失，用户可能以为录音丢了 | 历史详情对 `mode="note"` 显示「录音在笔记中」并可跳转；不复制音频是刻意取舍（否则 1 小时多 115MB） |
 | 录音与笔记一致性 | 停止录音时文件写失败，笔记可能只剩时长没有音频 | 先落文件、回填头，再写 `notes.audio_file`；任一步失败就整体回滚并明确报错。转写失败不影响录音与手写笔记 |

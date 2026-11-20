@@ -1,8 +1,12 @@
 //! 笔记与笔记目录的持久化。
 //!
-//! 与历史库完全独立：独立的 `notes.sqlite3`、独立的 schema 版本、独立的 `note_folders` /
-//! `notes` 两张表。历史库那边有 GC、租约、重识别等强语义，笔记只是「目录 + 一份文档 + 转录」，
-//! 混进同一张表会把两套生命周期绑在一起。
+//! 与历史模块共用 `db` 里的同一个数据库文件，但表与 schema 版本各自独立（版本记在
+//! `schema_meta` 的 `notes` 行）。共用文件是为了拿到跨模块的事务与外键：一次笔记转写要同时
+//! 写历史行和笔记 transcript，「历史 → 存为笔记」要读一侧写另一侧，拆成两个文件时这两处
+//! 既不能回滚也不能约束引用。
+//!
+//! `notes.history_id` 与 `note_recordings.history_id` 都指向 `transcription_history(id)`，
+//! `ON DELETE SET NULL`：历史被保留期淘汰时只断开引用，笔记本身不受影响。
 //!
 //! 约定：
 //!
@@ -11,7 +15,6 @@
 //! - `title` 允许为空，展示层兜底成「未命名笔记」，不在库里写死语言相关文案。
 //! - 文本内容只在这里落库；音频文件不归本模块管（见 `note_recording_service`），本模块只存文件名。
 
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::types::Value;
@@ -21,9 +24,8 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 
-use crate::utils::paths;
+use crate::db;
 
-const NOTES_DB_FILE: &str = "notes.sqlite3";
 const NOTES_SCHEMA_VERSION: i64 = 2;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
@@ -40,50 +42,19 @@ fn now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn notes_db_path() -> PathBuf {
-    paths::get_data_dir().join(NOTES_DB_FILE)
-}
-
-fn open_connection() -> Result<Connection, String> {
-    std::fs::create_dir_all(paths::get_data_dir())
-        .map_err(|error| format!("创建笔记数据目录失败: {error}"))?;
-    let connection = Connection::open(notes_db_path())
-        .map_err(|error| format!("打开笔记数据库失败: {error}"))?;
-    configure_runtime_connection(&connection)?;
-    Ok(connection)
-}
-
-fn configure_runtime_connection(connection: &Connection) -> Result<(), String> {
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| format!("设置笔记数据库等待时间失败: {error}"))?;
-    connection
-        .execute_batch("PRAGMA synchronous = NORMAL;")
-        .map_err(|error| format!("配置笔记数据库失败: {error}"))
-}
-
 fn migrate_schema(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute_batch("PRAGMA journal_mode = WAL;")
-        .map_err(|error| format!("启用笔记数据库 WAL 失败: {error}"))?;
-    let current_version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-        .map_err(|error| format!("读取笔记数据库版本失败: {error}"))?;
-    if current_version > NOTES_SCHEMA_VERSION {
-        return Err(format!(
-            "笔记数据库版本 {current_version} 高于当前支持的 {NOTES_SCHEMA_VERSION}"
-        ));
-    }
-    if current_version == NOTES_SCHEMA_VERSION {
-        return Ok(());
-    }
-
-    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
-        .map_err(|error| format!("开始笔记数据库迁移失败: {error}"))?;
-    if current_version < 1 {
-        transaction
-            .execute_batch(
-                r#"
+    // `notes` 与 `note_recordings` 的 `history_id` 是指向 `transcription_history` 的外键，
+    // SQLite 建表时会校验父表存在，所以历史模块必须先建。两步各自开事务，不能嵌套。
+    crate::services::history_service::migrate_schema(connection)?;
+    db::migrate_module(
+        connection,
+        "notes",
+        NOTES_SCHEMA_VERSION,
+        |transaction, current| {
+            if current < 1 {
+                transaction
+                .execute_batch(
+                    r#"
                 CREATE TABLE IF NOT EXISTS note_folders (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
                     name       TEXT    NOT NULL,
@@ -105,7 +76,7 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                     summary_source_hash  TEXT,
                     kind                 TEXT    NOT NULL DEFAULT 'personal',
                     duration_sec         REAL,
-                    history_id           INTEGER,
+                    history_id           INTEGER REFERENCES transcription_history(id) ON DELETE SET NULL,
                     audio_file           TEXT,
                     created_at           INTEGER NOT NULL,
                     updated_at           INTEGER NOT NULL
@@ -113,23 +84,23 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                 CREATE INDEX IF NOT EXISTS idx_notes_folder  ON notes(folder_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
                 "#,
-            )
-            .map_err(|error| format!("初始化笔记数据库失败: {error}"))?;
-    }
-    if current_version < 2 {
-        // 一条笔记允许多段录音：每段独立存文件、转录与历史引用。
-        // 老数据里 notes.audio_file 是单槽，原样灌成一段；灌完置 NULL，
-        // 之后 notes 不再持有音频引用，避免两个事实源漂移。
-        transaction
-            .execute_batch(
-                r#"
+                )
+                .map_err(|error| format!("初始化笔记数据库失败: {error}"))?;
+            }
+            if current < 2 {
+                // 一条笔记允许多段录音：每段独立存文件、转录与历史引用。
+                // 老数据里 notes.audio_file 是单槽，原样灌成一段；灌完置 NULL，
+                // 之后 notes 不再持有音频引用，避免两个事实源漂移。
+                transaction
+                .execute_batch(
+                    r#"
                 CREATE TABLE IF NOT EXISTS note_recordings (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
                     note_id      INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
                     audio_file   TEXT    NOT NULL,
                     duration_sec REAL,
                     transcript   TEXT,
-                    history_id   INTEGER,
+                    history_id   INTEGER REFERENCES transcription_history(id) ON DELETE SET NULL,
                     sort_order   INTEGER NOT NULL DEFAULT 0,
                     created_at   INTEGER NOT NULL
                 );
@@ -141,15 +112,12 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
                     FROM notes WHERE audio_file IS NOT NULL AND audio_file <> '';
                 UPDATE notes SET audio_file = NULL WHERE audio_file IS NOT NULL;
                 "#,
-            )
-            .map_err(|error| format!("升级笔记数据库到多段录音失败: {error}"))?;
-    }
-    transaction
-        .pragma_update(None, "user_version", NOTES_SCHEMA_VERSION)
-        .map_err(|error| format!("更新笔记数据库版本失败: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("提交笔记数据库迁移失败: {error}"))
+                )
+                .map_err(|error| format!("升级笔记数据库到多段录音失败: {error}"))?;
+            }
+            Ok(())
+        },
+    )
 }
 
 /// 幂等初始化。所有对外函数都先调它，与历史库保持同一范式。
@@ -157,7 +125,7 @@ pub async fn initialize() -> Result<(), String> {
     NOTES_INITIALIZED
         .get_or_try_init(|| async {
             tokio::task::spawn_blocking(|| {
-                let connection = open_connection()?;
+                let connection = db::open()?;
                 migrate_schema(&connection)
             })
             .await
@@ -733,8 +701,9 @@ fn move_note_with_connection(
 
 /// 删笔记，返回它所有段的音频文件名（外层 `None` = 笔记不存在）。
 ///
-/// 段表虽然有 `ON DELETE CASCADE`，运行时连接没开 `PRAGMA foreign_keys`，所以
-/// 这里显式先删段、再删笔记，保证没有孤儿文件引用漏出来。
+/// 段表虽然带 `ON DELETE CASCADE`，这里仍显式先删段：一是要先取到文件名交给调用方清盘，
+/// 二是删除行为不依赖编译期的 `SQLITE_DEFAULT_FOREIGN_KEYS` 默认值（本项目 `bundled`
+/// 构建默认是开的，但不该让正确性押在这个隐式事实上）。
 fn delete_note_with_connection(
     connection: &Connection,
     id: i64,
@@ -1108,7 +1077,7 @@ fn set_recording_transcript_with_connection(
 pub async fn list_folders() -> Result<Vec<NoteFolder>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(|| {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         list_folders_with_connection(&connection)
     })
     .await
@@ -1119,7 +1088,7 @@ pub async fn create_folder(name: &str) -> Result<NoteFolder, String> {
     initialize().await?;
     let name = name.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         insert_folder_with_connection(&connection, &name)
     })
     .await
@@ -1130,7 +1099,7 @@ pub async fn rename_folder(id: i64, name: &str) -> Result<NoteFolder, String> {
     initialize().await?;
     let name = name.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         rename_folder_with_connection(&connection, id, &name)
     })
     .await
@@ -1140,7 +1109,7 @@ pub async fn rename_folder(id: i64, name: &str) -> Result<NoteFolder, String> {
 pub async fn delete_folder(id: i64) -> Result<bool, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         delete_folder_with_connection(&connection, id)
     })
     .await
@@ -1150,7 +1119,7 @@ pub async fn delete_folder(id: i64) -> Result<bool, String> {
 pub async fn reorder_folders(ids: Vec<i64>) -> Result<Vec<NoteFolder>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         reorder_folders_with_connection(&connection, &ids)?;
         list_folders_with_connection(&connection)
     })
@@ -1161,7 +1130,7 @@ pub async fn reorder_folders(ids: Vec<i64>) -> Result<Vec<NoteFolder>, String> {
 pub async fn list_notes(query: NoteQuery) -> Result<NotePage, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         list_notes_with_connection(&connection, &query)
     })
     .await
@@ -1171,7 +1140,7 @@ pub async fn list_notes(query: NoteQuery) -> Result<NotePage, String> {
 pub async fn get_note(id: i64) -> Result<Option<NoteDetail>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         get_note_with_connection(&connection, id)
     })
     .await
@@ -1182,7 +1151,7 @@ pub async fn get_note(id: i64) -> Result<Option<NoteDetail>, String> {
 pub async fn find_note_id_by_history(history_id: i64) -> Result<Option<i64>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         find_note_id_by_history_with_connection(&connection, history_id)
     })
     .await
@@ -1195,7 +1164,7 @@ pub async fn find_note_id_by_history(history_id: i64) -> Result<Option<i64>, Str
 pub async fn find_note_ids_by_history(history_ids: Vec<i64>) -> Result<Vec<(i64, i64)>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         find_note_ids_by_history_with_connection(&connection, &history_ids)
     })
     .await
@@ -1208,7 +1177,7 @@ pub async fn find_note_ids_by_history(history_ids: Vec<i64>) -> Result<Vec<(i64,
 pub async fn audio_file_names() -> Result<std::collections::HashSet<String>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         audio_file_names_with_connection(&connection)
     })
     .await
@@ -1240,7 +1209,7 @@ pub async fn create_note(
     let title = title.to_string();
     let kind = kind.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         insert_note_with_connection(&connection, folder_id, &title, &kind)
     })
     .await
@@ -1250,7 +1219,7 @@ pub async fn create_note(
 pub async fn update_note(id: i64, patch: NotePatch) -> Result<Option<NoteDetail>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         update_note_with_connection(&connection, id, &patch)
     })
     .await
@@ -1260,7 +1229,7 @@ pub async fn update_note(id: i64, patch: NotePatch) -> Result<Option<NoteDetail>
 pub async fn move_note(id: i64, folder_id: Option<i64>) -> Result<Option<NoteDetail>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         move_note_with_connection(&connection, id, folder_id)
     })
     .await
@@ -1280,7 +1249,7 @@ pub async fn set_note_summary(
     let model = model.to_string();
     let source_hash = source_hash.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         set_note_summary_with_connection(
             &connection,
             id,
@@ -1300,7 +1269,7 @@ pub async fn set_note_summary(
 pub async fn delete_note(id: i64) -> Result<Option<Vec<String>>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         delete_note_with_connection(&connection, id)
     })
     .await
@@ -1316,7 +1285,7 @@ pub async fn add_note_recording(
     initialize().await?;
     let audio_file = audio_file.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         add_recording_with_connection(&connection, note_id, &audio_file, duration_sec)
     })
     .await
@@ -1326,7 +1295,7 @@ pub async fn add_note_recording(
 pub async fn list_note_recordings(note_id: i64) -> Result<Vec<NoteRecording>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         list_recordings_with_connection(&connection, note_id)
     })
     .await
@@ -1336,7 +1305,7 @@ pub async fn list_note_recordings(note_id: i64) -> Result<Vec<NoteRecording>, St
 pub async fn get_note_recording(id: i64) -> Result<Option<NoteRecording>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         get_recording_with_connection(&connection, id)
     })
     .await
@@ -1347,7 +1316,7 @@ pub async fn get_note_recording(id: i64) -> Result<Option<NoteRecording>, String
 pub async fn delete_note_recording(id: i64) -> Result<Option<(i64, String)>, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         delete_recording_with_connection(&connection, id)
     })
     .await
@@ -1363,7 +1332,7 @@ pub async fn set_note_recording_transcript(
     initialize().await?;
     let transcript = transcript.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         set_recording_transcript_with_connection(&connection, id, &transcript, history_id)
     })
     .await
@@ -1411,7 +1380,7 @@ pub async fn create_note_from_transcript(
     let kind = kind.to_string();
     let transcript = transcript.to_string();
     tokio::task::spawn_blocking(move || {
-        let connection = open_connection()?;
+        let connection = db::open()?;
         create_note_from_transcript_with_connection(
             &connection,
             folder_id,
@@ -1433,7 +1402,22 @@ mod tests {
     fn memory_connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         migrate_schema(&connection).unwrap();
+        seed_history(&connection, &[7, 42, 99]);
         connection
+    }
+
+    /// `history_id` 现在是真外键，测试里引用的历史行必须真的存在。
+    fn seed_history(connection: &Connection, ids: &[i64]) {
+        for id in ids {
+            connection
+                .execute(
+                    "INSERT INTO transcription_history \
+                     (id, session_id, created_at, updated_at, mode, status, text, original_text, engine) \
+                     VALUES (?1, 1, 0, 0, 'import', 'success', '转录', '转录', 'local')",
+                    params![id],
+                )
+                .unwrap();
+        }
     }
 
     fn query(folder_id: Option<i64>, unfiled: bool, term: &str) -> NoteQuery {
@@ -1901,11 +1885,14 @@ mod tests {
     #[test]
     fn migration_v1_to_v2_moves_the_single_audio_into_a_recording() {
         let connection = Connection::open_in_memory().unwrap();
+        // 老库里的 history_id 指向真实历史行，先建历史表并造一条。
+        crate::services::history_service::migrate_schema(&connection).unwrap();
+        seed_history(&connection, &[7]);
         connection
             .execute_batch(
                 "CREATE TABLE notes (id INTEGER PRIMARY KEY, transcript TEXT, \
                  duration_sec REAL, history_id INTEGER, audio_file TEXT, created_at INTEGER); \
-                 PRAGMA user_version = 1;",
+                 INSERT INTO schema_meta (module, version, updated_at) VALUES ('notes', 1, 0);",
             )
             .unwrap();
         connection
@@ -1930,9 +1917,56 @@ mod tests {
             .unwrap();
         assert!(legacy.is_none(), "迁移后 notes 不能再持有音频引用");
         let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .query_row(
+                "SELECT version FROM schema_meta WHERE module = 'notes'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(version, 2);
+    }
+
+    /// 合并成一个库之后，历史行被淘汰只应断开笔记侧的引用。
+    #[test]
+    fn deleting_history_row_only_clears_the_note_reference() {
+        let connection = Connection::open_in_memory().unwrap();
+        db::configure(&connection).unwrap();
+        migrate_schema(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO transcription_history \
+                 (id, session_id, created_at, updated_at, mode, status, text, original_text, engine) \
+                 VALUES (7, 1, 0, 0, 'import', 'success', '转录文本', '转录文本', 'local')",
+                [],
+            )
+            .unwrap();
+
+        let (note, created) = create_note_from_transcript_with_connection(
+            &connection,
+            None,
+            "来源",
+            "import",
+            "转录文本",
+            None,
+            7,
+        )
+        .unwrap();
+        assert!(created);
+        assert_eq!(note.history_id, Some(7));
+
+        connection
+            .execute("DELETE FROM transcription_history WHERE id = 7", [])
+            .unwrap();
+
+        let after = get_note_with_connection(&connection, note.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.history_id, None, "历史行删除后引用应被置空");
+        assert_eq!(
+            after.transcript.as_deref(),
+            Some("转录文本"),
+            "笔记正文不受影响"
+        );
     }
 
     #[test]

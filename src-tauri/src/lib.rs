@@ -1,4 +1,5 @@
 mod commands;
+mod db;
 mod ipc_policy;
 mod services;
 mod state;

@@ -84,7 +84,7 @@ fn history_gc_keeps_audio_when_reprocess_finishes_between_ownership_reads() {
 
     // delete() commits this row deletion before calling the same GC function.
     // Stop at that real boundary so the test controls both GC ownership reads.
-    let mut gc_connection = super::open_connection().unwrap();
+    let mut gc_connection = crate::db::open().unwrap();
     let transaction = gc_connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
@@ -114,7 +114,7 @@ fn history_gc_keeps_audio_when_reprocess_finishes_between_ownership_reads() {
             }
         ) && !hook_entered.swap(true, Ordering::SeqCst)
         {
-            let mut writer = super::open_connection().unwrap();
+            let mut writer = crate::db::open().unwrap();
             writer.busy_timeout(Duration::ZERO).unwrap();
             match writer.execute_batch("BEGIN IMMEDIATE") {
                 Ok(()) => {
@@ -211,7 +211,7 @@ fn history_gc_finishes_unlink_before_releasing_its_database_write_lock() {
     let hook_early_end = Arc::clone(&early_end);
     let hook_missing_lock = Arc::clone(&missing_write_lock);
     let hook_path = path.clone();
-    let connection = super::open_connection().unwrap();
+    let connection = crate::db::open().unwrap();
     connection.authorizer(Some(move |context: AuthContext<'_>| {
         // SQLite authorizes COMMIT/ROLLBACK before executing it. rusqlite 0.32
         // maps COMMIT to Unknown; every non-BEGIN transaction event ends it.
@@ -219,7 +219,7 @@ fn history_gc_finishes_unlink_before_releasing_its_database_write_lock() {
             if operation != TransactionOperation::Begin {
                 hook_ended.store(true, Ordering::SeqCst);
                 hook_early_end.fetch_or(hook_path.exists(), Ordering::SeqCst);
-                let writer = super::open_connection().unwrap();
+                let writer = crate::db::open().unwrap();
                 writer.busy_timeout(Duration::ZERO).unwrap();
                 match writer.execute_batch("BEGIN IMMEDIATE") {
                     Ok(()) => {
@@ -253,7 +253,7 @@ fn history_gc_finishes_unlink_before_releasing_its_database_write_lock() {
         !missing_write_lock.load(Ordering::SeqCst),
         "GC must still exclude database writers when unlink finishes"
     );
-    let writer = super::open_connection().unwrap();
+    let writer = crate::db::open().unwrap();
     writer.busy_timeout(Duration::ZERO).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
     complete_stats_test();
@@ -284,7 +284,7 @@ fn history_gc_retains_audio_on_either_ownership_query_failure_and_retries() {
             .unwrap();
         let denied = Arc::new(AtomicBool::new(false));
         let hook_denied = Arc::clone(&denied);
-        let connection = super::open_connection().unwrap();
+        let connection = crate::db::open().unwrap();
         connection.authorizer(Some(move |context: AuthContext<'_>| {
             if matches!(context.action, AuthAction::Read { table_name, .. } if table_name == table)
             {
@@ -305,7 +305,7 @@ fn history_gc_retains_audio_on_either_ownership_query_failure_and_retries() {
         );
 
         // A failed check must also release its transaction for the next attempt.
-        let writer = super::open_connection().unwrap();
+        let writer = crate::db::open().unwrap();
         writer.busy_timeout(Duration::ZERO).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
         super::cleanup_audio_if_unreferenced_with_connection(&connection, &audio_file);

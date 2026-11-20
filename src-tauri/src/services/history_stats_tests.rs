@@ -192,7 +192,7 @@ async fn stats_cache_invalidates_after_insert_delete_and_both_retention_paths() 
     assert_eq!(super::stats().await.unwrap().total, 1);
     assert!(!super::delete(deleted).await.unwrap());
 
-    let connection = super::open_connection().unwrap();
+    let connection = crate::db::open().unwrap();
     connection
         .execute(
             "UPDATE transcription_history SET created_at = 1 WHERE id = ?1",
@@ -231,7 +231,7 @@ async fn stats_cache_recovers_from_failed_mutations_and_partial_insert_cleanup()
         return;
     }
     let old = super::insert(stats_draft(1, "old"), 0).await.unwrap();
-    let connection = super::open_connection().unwrap();
+    let connection = crate::db::open().unwrap();
     connection
         .execute(
             "UPDATE transcription_history SET created_at = 1 WHERE id = ?1",
@@ -280,7 +280,7 @@ async fn stats_cache_observes_external_updates_without_row_count_changes() {
     let before = super::stats().await.unwrap();
     assert_eq!(before.total, 1);
     assert_eq!(before.asr.p50_ms, Some(10));
-    let connection = super::open_connection().unwrap();
+    let connection = crate::db::open().unwrap();
     connection
         .execute_batch("UPDATE transcription_history SET text = '改', asr_ms = 90, polish_ms = -1;")
         .unwrap();
@@ -323,7 +323,7 @@ async fn stats_cache_does_not_publish_a_stale_scan_after_external_commit() {
         .await
         .expect("statistics scan reaches publication boundary")
         .unwrap();
-    let connection = super::open_connection().unwrap();
+    let connection = crate::db::open().unwrap();
     let committed = connection.execute(
         "UPDATE transcription_history SET text = 'new text', asr_ms = 90",
         [],
@@ -346,7 +346,7 @@ async fn stats_cache_synthetic_workload_measurement() {
         return;
     }
     super::initialize().await.unwrap();
-    let mut connection = super::open_connection().unwrap();
+    let mut connection = crate::db::open().unwrap();
     let transaction = connection.transaction().unwrap();
     {
         let mut statement = transaction
