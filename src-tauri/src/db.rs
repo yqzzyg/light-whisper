@@ -15,7 +15,6 @@
 //! 版本管理：单文件只有一个 `PRAGMA user_version` 槽，两个模块会互相覆盖，因此各模块的
 //! 版本记在 `schema_meta(module, version)`，各自独立推进。
 
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -39,17 +38,12 @@ fn now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-/// 数据库文件路径。测试与排障需要知道它落在哪。
-pub fn path() -> PathBuf {
-    paths::get_data_dir().join(DB_FILE)
-}
-
 /// 打开一个已配置好的连接。
 ///
 /// 各 service 都是「每次操作开一个新连接」的范式，所以这里不返回共享连接，
 /// 也就不需要 `Mutex<Connection>` 包裹。
 pub fn open() -> Result<Connection, String> {
-    let path = path();
+    let path = paths::get_data_dir().join(DB_FILE);
     if let Some(directory) = path.parent() {
         std::fs::create_dir_all(directory).map_err(|error| format!("创建数据目录失败: {error}"))?;
     }
