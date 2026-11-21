@@ -75,7 +75,6 @@ const en: TranslationSchema = {
     importAnother: "Import another",
     importing: "Importing…",
     resultHint: "Saved to history. Copy it here, or edit before copying.",
-    streamingHint: "Transcribing — text appears in real time…",
     saveToNotes: "Save as note",
     saveToNotesDone: "Saved as a note",
     saveToNotesFailed: "Could not save as a note: {{error}}",

@@ -236,6 +236,33 @@ pub async fn save_audio(session_id: u64, wav: Vec<u8>) -> Result<String, String>
     .map_err(|error| format!("保存历史音频任务失败: {error}"))?
 }
 
+/// 历史音频在磁盘上的路径。
+///
+/// 「先落盘再转写」的调用方需要把路径交给转录层做直传，所以这里必须对外开一个
+/// 解析口；`safe_file_in_dir` 会挡掉 `../` 之类的越界文件名。
+pub fn audio_path(file_name: &str) -> Option<PathBuf> {
+    safe_audio_path(file_name)
+}
+
+/// 丢弃一个刚写入、但最终没有任何记录引用的音频文件。
+///
+/// 用于「先落盘再转写」的失败回滚：转写失败时那条历史不会带 `audio_file`，
+/// 文件留着就是孤儿。删除失败只记日志——它属于可重试的垃圾回收，
+/// 不能把已经确定的失败再包装成另一种失败。
+pub async fn discard_audio(file_name: &str) {
+    let Some(path) = safe_audio_path(file_name) else {
+        log::warn!("拒绝清理非法历史音频路径: {file_name}");
+        return;
+    };
+    let owned = file_name.to_string();
+    let _ = tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("清理未引用的历史音频失败: {owned}: {error}"),
+    })
+    .await;
+}
+
 pub async fn read_audio(file_name: &str) -> Result<Vec<u8>, String> {
     initialize().await?;
     let path = safe_audio_path(file_name).ok_or_else(|| "历史音频路径无效".to_string())?;

@@ -109,9 +109,9 @@ pub use interim::spawn_interim_loop;
 pub use monitor::{
     start_microphone_level_monitor, stop_microphone_level_monitor, test_microphone_sync,
 };
+pub(crate) use native_recording::spawn_native_recording;
 pub use native_recording::NativeRecording;
-pub(crate) use native_recording::{next_native_session_id, spawn_native_recording};
-pub use wav::{encode_wav, wav_duration_secs, wav_pcm16_samples};
+pub use wav::{encode_wav, wav_duration_secs};
 
 pub(crate) fn uses_native_stream(engine: &str) -> bool {
     matches!(engine, "qwen3-asr-0.6b" | "confucius4-r2t2")

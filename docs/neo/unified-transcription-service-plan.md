@@ -1,6 +1,6 @@
 # 转录服务统一化 — 方案
 
-> 状态：已实施（阶段 A–D 全部落地） · 最后更新：2026-11-21
+> 状态：已实施（阶段 A–D 全部落地），流式策略已于同日移除（见 §11） · 最后更新：2026-11-21
 > 落地时对设计做了三处收敛，见第 9 节；正文保留设计原貌以便对照。
 >
 > 起因：上传音频与笔记录音各走一条 ASR 链路，超时预算、切片策略、进度上报都各写一份，
@@ -48,6 +48,10 @@ let asr_result = if uses_native_streaming(&engine) {
 同一个命令里，两条分支的**持锁位置**都不一样，这是最需要收敛的地方。
 
 ## 3. 目标设计
+
+> **本节是当初的设计原貌，不是现行实现。** 文中的 `Preview::ImportInterim`、
+> `InterimChannel`、`Strategy::Streaming`、`pick_strategy` 都已在 2026-11-21 删除，
+> 现行实现见 §11。保留原文是为了对照「为什么当初认为需要流式」以及后来为何推翻。
 
 ### 3.1 唯一入口
 
@@ -359,3 +363,65 @@ idle ──picker──> picked(path, probe) ──user click──> transcribin
   可能有一处断句，已有 `snap_to_silence` 在 3 秒内找最小振幅落刀来缓解。
 
 本次未实施，只记录方向。
+
+## 11. 上传改为与笔记同一条路（2026-11-21 追加）
+
+### 11.1 为什么推翻 §3 的流式设计
+
+§3 保留流式，理由是「上传页要有渐进文字」。落地后实测与内存核算都不支持这个取舍：
+
+| 路径 | Rust 持有 | Python 持有 | 1 小时峰值 |
+|---|---|---|---:|
+| 上传·流式 | WAV 110MiB + `Vec<i16>` 110MiB | `_chunks` 220MiB + `concatenate` 220MiB | **660MiB** |
+| 笔记·整段 | 无 | int16 110 + float32 220 | 330MiB |
+| 切片（30 分钟块） | 无 | 单块 115MiB | **115MiB** |
+
+更关键的是一个缺陷：`pick_strategy` 的切片分支要求 `matches!(input, AudioInput::File(_))`，
+而上传传的是 `AudioInput::WavBytes`，**所以上传永远不会切片**。2 小时以上的上传不会报错，
+只会把内存吃满——笔记至少有 2 小时那道闸，上传一档都没有。
+
+改成「上传走整段字节」只能把 660MiB 降到 440MiB（`transcribe_whole` 里还有一次
+`bytes.to_vec()`），仍然远高于切片。真正的解是与笔记共用路径直传和切片。
+
+### 11.2 现行实现
+
+上传的流程变成：
+
+```text
+import_audio_to_wav(源文件) → save_audio(先落盘) → AudioInput::File(历史音频路径)
+  → transcribe(Whole 或 Chunked) → 成功沿用文件名 / 失败 discard_audio 回滚
+```
+
+三个要点：
+
+1. **落盘排在转写之前。** 音频最终本来就要存成历史文件，提前写一次让转录层能路径直传，
+   Rust 侧不必再留一份整段 WAV。代价是落盘成了转写的前置条件——磁盘不可写时转写也没有
+   意义（存不下结果），所以直接当入参问题报错，不再像以前那样静默丢掉音频。
+2. **失败回滚。** 新增 `history_service::discard_audio`，维持「失败记录不占音频文件」的语义。
+3. **策略层没有新增分支。** `Strategy` 与 `Plan` 合并成单个 `Plan { Whole, Chunked(&Path) }`，
+   `pick_strategy` 改名为 `plan_transcription`：只剩两种路且一一对应，再分两层就是空抽象。
+
+实测（`Downloads/note-6-1795098340882.wav`，317.7 秒，MX450 / qwen3-asr-0.6b）：
+识别 80.9 秒、总耗时 81.7 秒，1466 字，`history_audio/` 里能看到落盘的 WAV——约 3.9 倍实时。
+
+### 11.3 删掉的东西
+
+- `Strategy::Streaming` / `Plan::Streaming(Vec<i16>)` / `transcribe_streaming`
+- `transcription_events::InterimChannel`、`Preview::ImportInterim`、负数 sessionId 约定
+- `audio_service::wav_pcm16_samples`（只服务流式取样本，含两个单测）
+- 前端 `audioImportStore` 的 interim 订阅与 `interimText` 状态、`upload.streamingHint` 文案
+- 两个只测流式的单测（Rust `streaming_only_when_the_caller_asks_for_it`、
+  前端 `exposes negative-session interim text…` / `previews interim text in real time…`）
+
+`NativeStreamClient` **保留**：实时听写（`audio_service::native_recording`）仍在用它。
+
+### 11.4 已知代价
+
+- 上传页转写期间没有逐字文本，只显示「转写中」。用户看不到进展，长音频尤其明显。
+- 前端 `TranscriptionResult` 的 `isProcessing` 在上传页恒为 `false`（该属性仍被实时字幕使用）。
+
+### 11.5 仍未做
+
+切片阈值还是 2 小时（`CHUNK_THRESHOLD_SECS`），§10 提的「切片常态化」没有动。
+现在上传与笔记一样，10 分钟到 2 小时之间会走整段路径，按实测 0.26–0.39 倍实时外推，
+超过约 21–31 分钟就会撞 `dur/10 + 120` 的预算。

@@ -8,7 +8,6 @@ const mocks = vi.hoisted(() => ({
   isImporting: false,
   picked: null as { path: string; probe: Record<string, unknown> } | null,
   result: null as Record<string, unknown> | null,
-  interimText: null as string | null,
   hideMainWindow: vi.fn(),
   minimize: vi.fn(),
   copyToClipboard: vi.fn(),
@@ -27,7 +26,6 @@ vi.mock("@/hooks/useAudioImport", () => ({
     isImporting: mocks.isImporting,
     picked: mocks.picked,
     result: mocks.result,
-    interimText: mocks.interimText,
   }),
 }));
 
@@ -94,7 +92,6 @@ describe("UploadPage", () => {
     mocks.isImporting = false;
     mocks.picked = null;
     mocks.result = null;
-    mocks.interimText = null;
   });
 
   it("renders the upload title and select button", () => {
@@ -187,24 +184,6 @@ describe("UploadPage", () => {
     await waitFor(() => expect(mocks.createNoteFromHistory).toHaveBeenCalledWith(1));
     expect(mocks.toastSuccess).toHaveBeenCalledWith("upload.saveToNotesDone");
     expect(onNavigate).toHaveBeenCalledWith("notes");
-  });
-
-  it("does not offer save-as-note while the transcript is still streaming", () => {
-    mocks.isImporting = true;
-    mocks.interimText = "正在识别的半句";
-    render(<UploadPage onNavigate={vi.fn()} />);
-    expect(screen.queryByRole("button", { name: "upload.saveToNotes" })).toBeNull();
-  });
-
-  it("previews interim text in real time while importing", () => {
-    mocks.isImporting = true;
-    mocks.interimText = "正在识别的半句";
-    render(<UploadPage onNavigate={vi.fn()} />);
-    const textbox = screen.getByRole("textbox", {
-      name: "result.editableTranscription",
-    }) as HTMLTextAreaElement;
-    expect(textbox.value).toBe("正在识别的半句");
-    expect(screen.getByText("upload.streamingHint")).toBeTruthy();
   });
 
   it("copies the previewed result text", async () => {

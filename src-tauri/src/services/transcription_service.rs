@@ -1,34 +1,33 @@
 //! ASR 分派：所有语音转文字都从这里进来。
 //!
-//! 只有一个入口 [`transcribe`]，按「输入形态 + 预览意图」选策略：
+//! 只有一个入口 [`transcribe`]，按「输入形态 + 时长」选路：
 //!
 //! | 场景 | 策略 |
 //! |---|---|
 //! | 在线引擎（GLM / DashScope） | 整段字节，超限先拦 |
 //! | 本地引擎 + ≥2 小时文件 | 逐 30 分钟切片 |
-//! | 本地引擎 + 要实时文本 | 原生流式 |
 //! | 本地引擎 + 其余 | 整段，路径直传或内存字节 |
+//!
+//! 上传与笔记录音都先把音频落盘、再以 [`AudioInput::File`] 进来，因此长音频都能
+//! 享受切片；只有历史重识别这类手上只有字节的调用点走 [`AudioInput::WavBytes`]。
 //!
 //! 调用方只负责落库：上传写 `mode=import` 并保留音频，笔记写 `mode=note` 且不持有
 //! 音频文件。归档语义不属于转写，所以不放进这一层。
 //!
-//! [`transcribe_wav_bytes`] 与 [`transcribe_file`] 是给历史重识别等调用点留的薄
-//! 适配器，内部同样走 [`transcribe`]。
+//! 这里曾经还有一条「原生流式」策略，给上传页做渐进文字。2026-11-21 按用户决定去掉：
+//! 流式要求 Rust 侧先解出整段 `Vec<i16>`，Python 的 `_chunks` 再留一份 float32、
+//! `finish` 的 `concatenate` 又复制一份，1 小时音频峰值约 660MiB，是切片（约 115MiB）
+//! 的近 6 倍。上传页因此改为只显示进度，不再逐字出现。
 
 use std::path::Path;
 
-use crate::services::audio_service::next_native_session_id;
-use crate::services::funasr_service::native_stream::NativeStreamClient;
 use crate::state::AppState;
 use crate::utils::{paths, AppError};
 
 use super::audio_chunk_service::{self, WavChunker, CHUNK_SECS};
 use super::funasr_service::{self, TranscriptionResult};
-use super::transcription_events::{self, InterimChannel, Preview};
-use super::{alibaba_asr_service, audio_import_service, audio_service, glm_asr_service};
-
-/// 流式喂入块大小：16000 样本 = 1 秒。
-const STREAM_FEED_SAMPLES: usize = 16_000;
+use super::transcription_events::{self, Preview};
+use super::{alibaba_asr_service, audio_service, glm_asr_service};
 
 // 引擎限制常量，与各 ASR 服务保持一致。
 const GLM_MAX_DURATION_SECS: f64 = 30.0;
@@ -73,24 +72,14 @@ impl<'a> TranscribeOptions<'a> {
     }
 }
 
-/// 实际执行的策略。三种都不含引擎选择——在线引擎在 [`transcribe`] 里先分流了。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Strategy {
-    /// 整段交给引擎；走路径还是内存字节由入参决定。
-    Whole,
-    /// 原生流式：边转边出实时文本。
-    Streaming,
-    /// 逐 30 分钟切片。
-    Chunked,
-}
-
-/// 策略加上它需要的入参。
+/// 一次转写要走的路，以及这条路需要的入参。
 ///
-/// 先算成计划再执行，`match` 时就不会出现「策略对了但数据没准备」这种半成品状态；
-/// 流式所需的 PCM 也在这一步解好，从而把解码挡在 ASR 锁外面。
+/// 两步分开（先算计划、再拿锁执行）是为了让 `match` 时不会出现「路选对了但路径
+/// 没拿到」这种半成品状态。
 enum Plan<'a> {
+    /// 整段交给引擎；走路径还是内存字节由入参的变体决定。
     Whole,
-    Streaming(Vec<i16>),
+    /// 逐 30 分钟切片，需要能读盘的文件路径（切片要按静音找落刀点）。
     Chunked(&'a Path),
 }
 
@@ -135,8 +124,6 @@ pub fn check_engine_limit(wav_len: usize, duration_sec: f64) -> Result<(), AppEr
 
 /// 转写一段音频。
 ///
-/// 转写一段音频。
-///
 /// 本地引擎的所有策略共用同一个 Python 进程，整轮执行期间必须独占：锁只在这里
 /// 拿一次，下面调用的 `*_locked` 变体不再重入（`tokio::sync::Mutex` 不可重入）。
 pub async fn transcribe(
@@ -161,17 +148,12 @@ pub async fn transcribe(
         return dispatch_online(&engine, state, input, error_prefix).await;
     }
 
-    // 流式要先解码成 PCM；解码不占 ASR 锁，必须放在拿锁之前，
-    // 否则一次 mp3 解码会把同时触发的录音堵在锁外面。
-    let plan = plan_transcription(&input, &options, error_prefix)?;
+    let plan = plan_transcription(&input, &options);
 
     let _asr_guard = state.engine.native_asr_owner.lock().await;
     match plan {
         Plan::Whole => {
             transcribe_whole(app_handle, state, &input, duration_sec, error_prefix).await
-        }
-        Plan::Streaming(samples) => {
-            transcribe_streaming(app_handle, state, &samples, options.preview, error_prefix).await
         }
         Plan::Chunked(path) => {
             transcribe_chunked(
@@ -204,50 +186,23 @@ pub async fn transcribe_wav_bytes(
     .map_err(|error| error.message())
 }
 
-/// 策略选择是纯函数，便于单测锁住「什么时候切片、什么时候流式」。
-fn pick_strategy(input: &AudioInput<'_>, options: &TranscribeOptions<'_>) -> Strategy {
-    // 切片依赖 `WavChunker` 在文件里找静音落刀，所以只对路径输入生效。
-    if audio_chunk_service::should_chunk(options.duration_sec)
-        && matches!(input, AudioInput::File(_))
-    {
-        return Strategy::Chunked;
-    }
-    if options.preview == Preview::ImportInterim {
-        return Strategy::Streaming;
-    }
-    Strategy::Whole
-}
-
-/// 把策略落成可执行计划。流式需要的 PCM 在这里解好，不占 ASR 锁。
-fn plan_transcription<'a>(
-    input: &'a AudioInput<'a>,
-    options: &TranscribeOptions<'_>,
-    error_prefix: &str,
-) -> Result<Plan<'a>, AppError> {
-    Ok(match pick_strategy(input, options) {
-        Strategy::Whole => Plan::Whole,
-        Strategy::Chunked => match input {
-            AudioInput::File(path) => Plan::Chunked(path),
-            // pick_strategy 只在文件输入时给 Chunked；字节没有可切分的位置信息。
-            AudioInput::WavBytes(_) => Plan::Whole,
-        },
-        Strategy::Streaming => Plan::Streaming(streaming_samples(input, error_prefix)?),
-    })
-}
-
-/// 流式要按块喂 PCM：文件走通用解码（兼容 mp3/m4a），WAV 字节直接取样本。
-fn streaming_samples(input: &AudioInput<'_>, error_prefix: &str) -> Result<Vec<i16>, AppError> {
-    match input {
-        AudioInput::File(path) => audio_import_service::decode_to_16k_mono(path)
-            .map(|decoded| decoded.samples)
-            .map_err(|error| prefixed(error, error_prefix)),
-        AudioInput::WavBytes(bytes) => {
-            audio_service::wav_pcm16_samples(bytes).map_err(|error| prefixed(error, error_prefix))
+/// 选路是纯函数，便于单测锁住「什么时候切片」。
+///
+/// 切片依赖 `WavChunker` 在文件里找静音落刀，所以只对路径输入生效；内存字节没有
+/// 可切分的位置信息，再长也只能整段交出去。
+fn plan_transcription<'a>(input: &'a AudioInput<'a>, options: &TranscribeOptions<'_>) -> Plan<'a> {
+    if audio_chunk_service::should_chunk(options.duration_sec) {
+        if let AudioInput::File(path) = input {
+            return Plan::Chunked(path);
         }
     }
+    Plan::Whole
 }
 
 /// 整段转写：文件走路径直传（不读进内存、不落临时副本），字节直接交给引擎。
+///
+/// 引擎失败时返回的是 `Ok(success: false)`（而非 `Err`），所以这里必须再校验一次：
+/// 否则调用方会把「引擎报错、文本为空」当成转写成功记进历史，上传侧的失败回滚也不会触发。
 async fn transcribe_whole(
     app_handle: &tauri::AppHandle,
     state: &AppState,
@@ -264,58 +219,9 @@ async fn transcribe_whole(
             funasr_service::transcribe_locked(state, bytes.to_vec(), app_handle).await
         }
     };
-    result.map_err(|error| prefixed(error, error_prefix))
-}
-
-/// 原生流式转写：按 1 秒一块喂入，边转边推 interim，最后 finish 出定稿。
-///
-/// 只有上传页会走到这里；实时听写有自己的链路（`audio_service`），不经过本函数。
-async fn transcribe_streaming(
-    app_handle: &tauri::AppHandle,
-    state: &AppState,
-    samples: &[i16],
-    preview: Preview,
-    error_prefix: &str,
-) -> Result<TranscriptionResult, AppError> {
-    if !state.is_funasr_ready() {
-        return Err(AppError::Asr(format!(
-            "{error_prefix}：语音识别引擎尚未就绪，请等待初始化完成"
-        )));
-    }
-
-    let interim = (preview == Preview::ImportInterim).then(InterimChannel::open);
-
-    // 原生会话 id 必须与录音共用同一个单调递增计数器：常驻 Python 引擎会拒绝
-    // 不大于上一次的 session id。用时间戳会把会话上限抬到万亿级，之后所有录音
-    // （1、2、3…）都会被当成旧会话拒绝。
-    let mut client = NativeStreamClient::start(
-        state,
-        Some(app_handle),
-        next_native_session_id(),
-        String::new(),
-        None,
-    )
-    .await
-    .map_err(|error| prefixed(error, error_prefix))?;
-
-    for chunk in samples.chunks(STREAM_FEED_SAMPLES) {
-        let update = match client.feed(state, Some(app_handle), chunk).await {
-            Ok(update) => update,
-            Err(error) => {
-                // 喂入失败要释放引擎侧会话，否则下一轮会撞上「会话已占用」。
-                let _ = client.cancel(state, Some(app_handle)).await;
-                return Err(prefixed(error, error_prefix));
-            }
-        };
-        if let Some(channel) = &interim {
-            channel.emit(app_handle, &update);
-        }
-    }
-
-    client
-        .finish(state, Some(app_handle))
-        .await
+    result
         .map_err(|error| prefixed(error, error_prefix))
+        .and_then(|result| require_success(result, error_prefix))
 }
 
 /// 逐 30 分钟切片转写，最后拼成一段文本。
@@ -454,45 +360,31 @@ mod tests {
     }
 
     #[test]
-    fn long_files_are_chunked_before_streaming() {
-        // 两小时以上的上传以前走流式（7200 次 IPC），现在应先切片。
+    fn long_files_are_chunked() {
         let input = AudioInput::File(Path::new("meeting.wav"));
         let options = TranscribeOptions::new("转写失败")
-            .with_duration(Some(audio_chunk_service::CHUNK_THRESHOLD_SECS))
-            .with_preview(Preview::ImportInterim);
-        assert_eq!(pick_strategy(&input, &options), Strategy::Chunked);
-    }
-
-    #[test]
-    fn streaming_only_when_the_caller_asks_for_it() {
-        let ask = TranscribeOptions::new("转写失败").with_preview(Preview::ImportInterim);
-        assert_eq!(
-            pick_strategy(&AudioInput::File(Path::new("note.wav")), &ask),
-            Strategy::Streaming
-        );
-        // 上传解码后的 WAV 字节同样能流式，不必为了喂样本再落一份临时文件。
-        assert_eq!(
-            pick_strategy(&AudioInput::WavBytes(&[0u8; 64]), &ask),
-            Strategy::Streaming
-        );
-
-        // 笔记只关心切片进度，不该被拉去流式。
-        let note = TranscribeOptions::new("转写失败").with_preview(Preview::ChunkProgress {
-            note_id: 1,
-            recording_id: 2,
-        });
-        assert_eq!(
-            pick_strategy(&AudioInput::File(Path::new("note.wav")), &note),
-            Strategy::Whole
-        );
+            .with_duration(Some(audio_chunk_service::CHUNK_THRESHOLD_SECS));
+        assert!(matches!(
+            plan_transcription(&input, &options),
+            Plan::Chunked(_)
+        ));
     }
 
     #[test]
     fn short_files_take_the_whole_path() {
         let options = TranscribeOptions::new("转写失败").with_duration(Some(300.0));
-        assert_eq!(
-            pick_strategy(&AudioInput::File(Path::new("clip.wav")), &options),
-            Strategy::Whole
-        );
+        assert!(matches!(
+            plan_transcription(&AudioInput::File(Path::new("clip.wav")), &options),
+            Plan::Whole
+        ));
+    }
+
+    #[test]
+    fn bytes_never_chunk_however_long() {
+        // 内存字节没有可切分的位置信息：宁可整段，也不假装切了。
+        let input = AudioInput::WavBytes(&[0u8; 64]);
+        let options = TranscribeOptions::new("转写失败")
+            .with_duration(Some(audio_chunk_service::CHUNK_THRESHOLD_SECS * 2.0));
+        assert!(matches!(plan_transcription(&input, &options), Plan::Whole));
     }
 }

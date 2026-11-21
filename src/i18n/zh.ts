@@ -73,7 +73,6 @@ const zh = {
     importAnother: "再传一个",
     importing: "正在导入…",
     resultHint: "结果已存入历史，可直接复制或编辑后复制。",
-    streamingHint: "正在识别，文字会实时出现…",
     saveToNotes: "存为笔记",
     saveToNotesDone: "已存为笔记",
     saveToNotesFailed: "存为笔记失败：{{error}}",

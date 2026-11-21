@@ -1,16 +1,16 @@
 //! 导入音频转写命令。
 //!
-//! 与「边录边转」解耦：选择本地音频文件 → 解码为 16k WAV → 交给统一的转录入口
-//! → 存入历史，不自动粘贴。
+//! 与「边录边转」解耦：选择本地音频文件 → 解码为 16k WAV → 落盘 → 交给统一的转录
+//! 入口 → 存入历史，不自动粘贴。落盘排在转写之前，是为了让转录层走路径直传与切片，
+//! Rust 侧不必再留一份整段 PCM。
 //!
-//! 转写细节（引擎分派、原生流式、长音频切片）都在
-//! `services::transcription_service`；本命令只负责解码、落库与错误留痕。
+//! 转写细节（引擎分派、长音频切片）都在 `services::transcription_service`；
+//! 本命令只负责解码、落盘与错误留痕。
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::Emitter;
 
-use crate::services::transcription_events::Preview;
 use crate::services::transcription_service::{self, AudioInput, TranscribeOptions};
 use crate::services::{audio_import_service, history_service};
 use crate::state::AppState;
@@ -118,17 +118,24 @@ pub async fn transcribe_imported_audio(
     let retention_days = state.with_profile(|profile| profile.history_settings.retention_days);
 
     // 解码与引擎上限属于「入参问题」，失败直接抛 Err 让前端提示，不在历史里留痕。
-    // 这一次解码的产物同时用于转写与落盘，转写走内存字节，成功后原样存为历史音频。
     let imported = audio_import_service::import_audio_to_wav(std::path::Path::new(&path))?;
+
+    // 先落盘再转写。音频最终本来就要存成历史文件，提前写一次让转录层能走路径直传：
+    // Rust 侧因此不必再留一份整段 WAV，长音频也能进切片，内存不再随录音长度翻倍。
+    // 代价是落盘成了转写的前置条件——磁盘不可写时转写也没有意义（存不下结果），
+    // 所以这里直接当入参问题报错，而不是像以前那样静默丢掉音频。
+    let audio_file = history_service::save_audio(session_id, imported.wav)
+        .await
+        .map_err(|error| AppError::Asr(format!("导入转写失败：保存音频失败: {error}")))?;
+    let audio_path = history_service::audio_path(&audio_file)
+        .ok_or_else(|| AppError::Asr("导入转写失败：历史音频路径无效".into()))?;
 
     let asr_started = Instant::now();
     let asr_result = transcription_service::transcribe(
         &app_handle,
         state.inner(),
-        AudioInput::WavBytes(&imported.wav),
-        TranscribeOptions::new("导入转写失败")
-            .with_duration(Some(imported.duration_sec))
-            .with_preview(Preview::ImportInterim),
+        AudioInput::File(&audio_path),
+        TranscribeOptions::new("导入转写失败").with_duration(Some(imported.duration_sec)),
     )
     .await;
     let asr_ms = Some(asr_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
@@ -147,16 +154,11 @@ pub async fn transcribe_imported_audio(
         ),
     };
 
-    // 成功才保存音频；失败记录也留痕但不占音频文件。
+    // 成功则沿用已落盘的文件；失败把音频删掉，失败记录只留痕、不占文件。
     let audio_file = if status == "success" {
-        match history_service::save_audio(session_id, imported.wav).await {
-            Ok(file) => Some(file),
-            Err(e) => {
-                log::warn!("导入音频保存失败（转写结果仍保留）: {e}");
-                None
-            }
-        }
+        Some(audio_file)
     } else {
+        history_service::discard_audio(&audio_file).await;
         None
     };
 
@@ -212,8 +214,4 @@ mod tests {
             "import session id should be timestamp-like, got {id}"
         );
     }
-
-    // 原生流式会话 id 现在由 transcription_service 统一申请（与录音共用同一个
-    // 递增计数器），导入不再自己生成，原先「导入把计数器抬到万亿级」的回归
-    // 已无从复现，故相关用例随分支一起删除。
 }

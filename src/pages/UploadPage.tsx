@@ -49,17 +49,15 @@ export default function UploadPage({
   animClass?: string;
 }) {
   const { t } = useTranslation();
-  const { isImporting, picked, result, interimText, selectAudio, startImport, cancelSelection }
+  const { isImporting, picked, result, selectAudio, startImport, cancelSelection }
     = useAudioImport();
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 导入中：本地引擎边转边推 interim，用同一张结果卡逐句显示；
-  // 转完（或在线引擎）后切到最终记录。
-  const isStreaming = isImporting && !!interimText;
+  // 转写期间没有逐字文本（上传与笔记走同一条切片/整段路径），转完才有结果卡。
   const finalResult = result !== null && result.status !== "asr_error" && !!result.text;
-  const hasResult = isStreaming || finalResult;
-  const previewText = isStreaming ? interimText : finalResult ? result.text : null;
+  const hasResult = finalResult;
+  const previewText = finalResult ? result.text : null;
   // 已选好文件、尚未开始：这一段显示文件信息与「开始转写」。
   const awaitingConfirm = picked !== null && !isImporting && !hasResult;
 
@@ -184,22 +182,20 @@ export default function UploadPage({
           <div className="upload-result animate-slide-up">
             <TranscriptionResult
               text={previewText}
-              originalText={isStreaming ? null : (result?.originalText ?? null)}
-              isProcessing={isStreaming}
+              originalText={result?.originalText ?? null}
+              isProcessing={false}
               copiedId={copiedId}
               onCopy={handleCopy}
-              durationSec={isStreaming ? null : (result?.durationSec ?? null)}
+              durationSec={result?.durationSec ?? null}
               charCount={previewText.length}
-              detectedLanguage={isStreaming ? null : (result?.language ?? null)}
-              timing={isStreaming ? undefined : {
+              detectedLanguage={result?.language ?? null}
+              timing={{
                 asrMs: result?.asrMs ?? undefined,
                 polishMs: result?.polishMs ?? undefined,
                 totalMs: result?.totalMs ?? undefined,
               }}
             />
-            <p className="upload-result-hint">
-              {t(isStreaming ? "upload.streamingHint" : "upload.resultHint")}
-            </p>
+            <p className="upload-result-hint">{t("upload.resultHint")}</p>
             {finalResult && (
               <button type="button" className="upload-save-note-btn" onClick={() => void handleSaveAsNote()}>
                 <NotebookPen size={13} aria-hidden="true" />

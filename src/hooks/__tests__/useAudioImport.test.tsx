@@ -1,32 +1,15 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => {
-  // 简易事件总线：listen 注册 handler，emit 手动触发。
-  const handlers = new Set<(event: { payload: Record<string, unknown> }) => void>();
-  return {
-    pickAudioFile: vi.fn(),
-    probeAudioFile: vi.fn(),
-    transcribeImportedAudio: vi.fn(),
-    toastSuccess: vi.fn(),
-    toastError: vi.fn(),
-    t: vi.fn((key: string, vars?: Record<string, unknown>) =>
-      vars ? `${key}:${JSON.stringify(vars)}` : key,
-    ),
-    listen: vi.fn((_event: string, handler: (event: { payload: Record<string, unknown> }) => void) => {
-      handlers.add(handler);
-      return Promise.resolve(() => handlers.delete(handler));
-    }),
-    emitInterim: (payload: Record<string, unknown>) => {
-      handlers.forEach((handler) => handler({ payload }));
-    },
-    handlerCount: () => handlers.size,
-    clearHandlers: () => handlers.clear(),
-  };
-});
-
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: mocks.listen,
+const mocks = vi.hoisted(() => ({
+  pickAudioFile: vi.fn(),
+  probeAudioFile: vi.fn(),
+  transcribeImportedAudio: vi.fn(),
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
+  t: vi.fn((key: string, vars?: Record<string, unknown>) =>
+    vars ? `${key}:${JSON.stringify(vars)}` : key,
+  ),
 }));
 
 vi.mock("@/api/tauri", () => ({
@@ -103,7 +86,6 @@ describe("useAudioImport", () => {
   afterEach(() => {
     resetAudioImportStoreForTests();
     vi.clearAllMocks();
-    mocks.clearHandlers();
   });
 
   it("only probes on selection and waits for an explicit start", async () => {
@@ -265,39 +247,6 @@ describe("useAudioImport", () => {
     });
 
     expect(mocks.transcribeImportedAudio).toHaveBeenCalledTimes(1);
-  });
-
-  it("exposes negative-session interim text during streaming and clears it on finish", async () => {
-    let resolveTranscribe!: (value: unknown) => void;
-    mocks.transcribeImportedAudio.mockImplementation(
-      () => new Promise((resolve) => { resolveTranscribe = resolve; }),
-    );
-    const { result } = renderHook(() => useAudioImport());
-    await act(async () => {
-      await result.current.selectAudio();
-    });
-
-    let pending!: Promise<void>;
-    act(() => {
-      pending = result.current.startImport();
-    });
-    await waitFor(() => expect(mocks.transcribeImportedAudio).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(mocks.handlerCount()).toBeGreaterThan(0));
-
-    // 负数 sessionId 的 interim 应被接收；正数（录音会话）应被忽略。
-    act(() => {
-      mocks.emitInterim({ sessionId: 5, text: "录音字幕", interim: true });
-      mocks.emitInterim({ sessionId: -1_000_001, text: "导入的字", interim: true });
-      mocks.emitInterim({ sessionId: -1_000_002, text: "导入的字更多", interim: true });
-    });
-    expect(result.current.interimText).toBe("导入的字更多");
-
-    await act(async () => {
-      resolveTranscribe(successRecord({ text: "导入的字更多" }));
-      await pending;
-    });
-    expect(result.current.interimText).toBeNull();
-    expect(result.current.result?.text).toBe("导入的字更多");
   });
 
   it("keeps the result after the page unmounts and mounts again", async () => {
