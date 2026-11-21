@@ -2,8 +2,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 
-import { pickAudioFile, transcribeImportedAudio } from "@/api/tauri";
-import type { PersistentHistoryRecord } from "@/types";
+import { pickAudioFile, probeAudioFile, transcribeImportedAudio } from "@/api/tauri";
+import type { AudioProbe, PersistentHistoryRecord } from "@/types";
 
 interface ImportInterimPayload {
   sessionId: number;
@@ -11,9 +11,18 @@ interface ImportInterimPayload {
   interim?: boolean;
 }
 
+/** 已选中、尚未开始转写的文件。 */
+export interface PickedAudio {
+  path: string;
+  probe: AudioProbe;
+}
+
 export interface AudioImportState {
+  /** 正在转写。 */
   isImporting: boolean;
-  /** 最近一次成功转写的记录，供上传页直接预览；失败或新一轮导入时清空。 */
+  /** 已选文件与元信息；用户点「开始转写」前一直留在这里。 */
+  picked: PickedAudio | null;
+  /** 最近一次成功转写的记录，供上传页直接预览；失败或新一轮选择时清空。 */
   result: PersistentHistoryRecord | null;
   /** 本地引擎流式转写过程中的实时文本；仅在导入中非空。 */
   interimText: string | null;
@@ -21,6 +30,7 @@ export interface AudioImportState {
 
 const INITIAL_STATE: AudioImportState = {
   isImporting: false,
+  picked: null,
   result: null,
   interimText: null,
 };
@@ -29,13 +39,14 @@ const INITIAL_STATE: AudioImportState = {
  * 导入状态放在模块级而不是组件内。
  *
  * 左侧栏切换时只挂载当前页面，UploadPage 会卸载；如果状态跟着组件走，
- * 转写结果（以及正在进行的转写）都会随卸载丢失。放在模块级后，组件只做订阅，
- * 离开页面再回来仍能看到结果，转写过程也不会中断。
+ * 选好的文件、转写结果（以及正在进行的转写）都会随卸载丢失。放在模块级后，
+ * 组件只做订阅，离开页面再回来仍能看到结果，转写过程也不会中断。
  */
 let state: AudioImportState = INITIAL_STATE;
 const listeners = new Set<() => void>();
 
-let inFlight = false;
+/** 选择与转写互斥：两次点击最多只有一个在跑。 */
+let busy = false;
 let unlisten: UnlistenFn | null = null;
 let subscribing: Promise<void> | null = null;
 
@@ -43,6 +54,7 @@ function setState(patch: Partial<AudioImportState>) {
   const next = { ...state, ...patch };
   if (
     next.isImporting === state.isImporting
+    && next.picked === state.picked
     && next.result === state.result
     && next.interimText === state.interimText
   ) {
@@ -104,32 +116,66 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-export async function startAudioImport(t: TFunction): Promise<void> {
-  // 防止重复点击并发导入。
-  if (inFlight) return;
-  inFlight = true;
-  setState({ isImporting: true });
-
+/**
+ * 选择音频并探测信息，不发起转写。
+ *
+ * 选完文件立刻能拿到时长与预估耗时，用户可以判断要不要等——比点了按钮等两分钟
+ * 才发现文件选错要好。探测失败（格式不支持、文件损坏）在这里就报错，不进入下一步。
+ */
+export async function selectAudio(t: TFunction): Promise<void> {
+  if (busy) return;
+  busy = true;
   try {
     const path = await pickAudioFile();
-    if (!path) return; // 用户取消，保留上一次的结果。
+    if (!path) return; // 用户取消：保留当前已选文件与上一次结果。
 
-    // 新一轮转写开始，先撤掉上一次的结果与字幕，避免展示过期内容。
-    setState({ result: null, interimText: null });
+    const probe = await probeAudioFile(path);
+    setState({ picked: { path, probe }, result: null, interimText: null });
+  } catch (error) {
+    toast.error(t("toast.importAudioFailed", { error: errorMessage(error) }));
+  } finally {
+    busy = false;
+  }
+}
+
+/** 放弃已选文件，回到「选择音频文件」。 */
+export function cancelSelection(): void {
+  if (busy) return;
+  setState({ picked: null });
+}
+
+/**
+ * 转写已选中的文件。
+ *
+ * 本地引擎边转边推 interim（负数 sessionId），只接收负数 sessionId 的中间结果
+ * ——浮层与录音主界面都会忽略它们，导入字幕不会串到别处。在线引擎不支持流式，
+ * 转完一次性出结果。结果不回灌主结果区、不自动粘贴。
+ */
+export async function startImport(t: TFunction): Promise<void> {
+  const picked = state.picked;
+  if (busy || !picked) return;
+  if (picked.probe.limitHint) {
+    toast.error(t("toast.importAudioFailed", { error: picked.probe.limitHint }));
+    return;
+  }
+
+  busy = true;
+  setState({ isImporting: true, result: null, interimText: null });
+  try {
     await ensureInterimSubscription();
-
-    const record: PersistentHistoryRecord = await transcribeImportedAudio(path);
+    const record: PersistentHistoryRecord = await transcribeImportedAudio(picked.path);
     if (record.status === "asr_error") {
+      // 保留 picked：同一份文件可以直接重试，不必重新选一遍。
       toast.error(t("toast.importAudioFailed", { error: record.error || t("common.retry") }));
       return;
     }
     // 结果直接呈现在上传页，不再用 toast 重复告知。
-    setState({ result: record });
+    setState({ result: record, picked: null });
   } catch (error) {
     toast.error(t("toast.importAudioFailed", { error: errorMessage(error) }));
   } finally {
     releaseInterimSubscription();
-    inFlight = false;
+    busy = false;
     setState({ isImporting: false, interimText: null });
   }
 }
@@ -137,7 +183,7 @@ export async function startAudioImport(t: TFunction): Promise<void> {
 /** 仅用于测试：清空模块级状态，避免用例之间互相影响。 */
 export function resetAudioImportStoreForTests() {
   releaseInterimSubscription();
-  inFlight = false;
+  busy = false;
   state = INITIAL_STATE;
   listeners.clear();
 }

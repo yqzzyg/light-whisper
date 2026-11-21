@@ -38,6 +38,60 @@ pub struct ImportedPcm {
     pub duration_sec: f64,
 }
 
+/// 音频元信息。只读容器头，不解码样本。
+#[derive(Debug, Clone)]
+pub struct AudioMeta {
+    /// 容器声明的总时长。少数没有帧数信息的 mp3 会拿不到，此时为 `None`。
+    pub duration_sec: Option<f64>,
+    /// 原始采样率。
+    pub sample_rate: u32,
+    /// 源文件字节数。
+    pub size_bytes: u64,
+}
+
+/// 探测音频元信息，供「选完文件先回显、再由用户决定是否转写」使用。
+///
+/// 只做文件预检与容器头解析，不解码样本，所以对几分钟的 mp3 也是常数开销。
+/// 时长拿不到时返回 `None` 而不是退化成全解码——那会让这一步从毫秒变成秒级，
+/// 违背「选完立刻回显」的初衷。
+pub fn probe_audio(path: &Path) -> Result<AudioMeta, AppError> {
+    let size_bytes = precheck(path)?;
+    let file =
+        std::fs::File::open(path).map_err(|e| AppError::Asr(format!("打开音频文件失败: {e}")))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| AppError::Asr(format!("音频格式探测失败: {e}")))?;
+    let track = probed
+        .format
+        .default_track()
+        .ok_or_else(|| AppError::Asr("音频文件中没有可用的音轨".into()))?;
+
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let duration_sec = track
+        .codec_params
+        .n_frames
+        .filter(|_| sample_rate > 0)
+        .map(|frames| frames as f64 / sample_rate as f64);
+
+    Ok(AudioMeta {
+        duration_sec,
+        sample_rate,
+        size_bytes,
+    })
+}
+
 /// 预检 → 解码 → 重采样为 16k 单声道 PCM。
 ///
 /// 一次性文件转写（`import_audio_to_wav`）与流式转写共用这一段，
@@ -325,6 +379,33 @@ mod tests {
         fs::write(&path, b"RIFFfakefakefake").unwrap();
         // 只要不 panic 且返回 Err 即可。
         let _ = import_audio_to_wav(&path);
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn probe_audio_reads_duration_without_decoding_samples() {
+        // 3 秒 16k 单声道：时长应由容器帧数直接得出，用于「选完文件先回显」。
+        let path = temp_wav_path("probe");
+        let samples: Vec<i16> = (0..48_000).map(|i| (i % 200) as i16 - 100).collect();
+        write_wav(&path, &samples, 16_000, 1);
+
+        let meta = probe_audio(&path).unwrap();
+        assert_eq!(meta.sample_rate, 16_000);
+        assert_eq!(meta.size_bytes, fs::metadata(&path).unwrap().len());
+        let duration = meta.duration_sec.expect("WAV 头应能给出帧数");
+        assert!(
+            (duration - 3.0).abs() < 0.01,
+            "expected ~3s, got {duration}"
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn probe_audio_rejects_unsupported_extension() {
+        let path = std::env::temp_dir().join("light_whisper_probe_bad.txt");
+        fs::write(&path, b"not audio").unwrap();
+        assert!(probe_audio(&path).is_err());
         fs::remove_file(&path).ok();
     }
 }

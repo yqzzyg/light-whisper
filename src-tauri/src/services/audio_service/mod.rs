@@ -111,7 +111,7 @@ pub use monitor::{
 };
 pub use native_recording::NativeRecording;
 pub(crate) use native_recording::{next_native_session_id, spawn_native_recording};
-pub use wav::{encode_wav, wav_duration_secs};
+pub use wav::{encode_wav, wav_duration_secs, wav_pcm16_samples};
 
 pub(crate) fn uses_native_stream(engine: &str) -> bool {
     matches!(engine, "qwen3-asr-0.6b" | "confucius4-r2t2")

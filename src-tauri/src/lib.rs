@@ -377,6 +377,7 @@ pub fn run() {
             commands::selection::run_selection_action,
             commands::selection::cancel_selection_action,
             commands::audio_import::pick_audio_file,
+            commands::audio_import::probe_audio_file,
             commands::audio_import::transcribe_imported_audio,
             commands::history::list_transcription_history,
             commands::history::get_transcription_history_stats,

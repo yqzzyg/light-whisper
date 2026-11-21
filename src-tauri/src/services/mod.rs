@@ -25,6 +25,7 @@ pub mod qwen_hotword_service;
 pub mod screen_capture_service;
 pub mod screen_vision_service;
 pub mod selection_service;
+pub mod transcription_events;
 pub mod transcription_service;
 pub mod wav_writer;
 pub mod web_search_service;

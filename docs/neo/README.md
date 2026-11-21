@@ -21,4 +21,5 @@
 |---|---|
 | `notes-feature-plan.md` | 笔记功能：方案调研 + 工作清单，P0–P4 已完成，P5 部分落地 |
 | `import-audio-transcription-plan.md` | 上传音频转写：详细实施方案 |
+| `unified-transcription-service-plan.md` | 转录服务统一化：上传与笔记收敛到同一入口 + 两段式上传，已实施 |
 | `ui-redesign-prd.md` | UI 改版 PRD，已按实际交付更新 |

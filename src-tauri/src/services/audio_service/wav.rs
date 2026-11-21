@@ -82,6 +82,29 @@ pub fn wav_duration_secs(bytes: &[u8]) -> Option<f64> {
     Some(data_bytes as f64 / byte_rate as f64)
 }
 
+// ---------- WAV 解码 ----------
+
+/// 从内存 WAV 取出 16bit 单声道样本。
+///
+/// 只接受已经是 16k 单声道的 WAV——上传路径的 `import_audio_to_wav` 保证这一点。
+/// 有了它，流式转写可以直接从字节取 PCM，不必为了拿样本先写盘再解码一遍；
+/// 这里也不做重采样，免得在转写热路径上再养一套转换逻辑。
+pub fn wav_pcm16_samples(bytes: &[u8]) -> Result<Vec<i16>, AppError> {
+    let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes))
+        .map_err(|e| AppError::Audio(format!("WAV 解析失败: {e}")))?;
+    let spec = reader.spec();
+    if spec.channels != 1 || spec.bits_per_sample != 16 {
+        return Err(AppError::Audio(format!(
+            "WAV 需为 16bit 单声道，当前为 {}bit {} 声道",
+            spec.bits_per_sample, spec.channels
+        )));
+    }
+    reader
+        .samples::<i16>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Audio(format!("WAV 采样读取失败: {e}")))
+}
+
 // ---------- 单元测试 ----------
 //
 // TDD red-state tests for `encode_wav`.
@@ -162,5 +185,33 @@ mod tests {
             (duration - 2.0).abs() < 0.001,
             "unexpected duration: {duration}"
         );
+    }
+
+    #[test]
+    fn test_wav_pcm16_samples_round_trips_encoded_wav() {
+        // 流式转写靠它从内存 WAV 直接取样本，必须与 encode_wav 严格互逆。
+        let samples = [0i16, 1, -1, 32_767, -32_768, 12_345];
+        let bytes = encode_wav(&samples, 16_000).unwrap();
+        assert_eq!(wav_pcm16_samples(&bytes).unwrap(), samples.to_vec());
+    }
+
+    #[test]
+    fn test_wav_pcm16_samples_rejects_multichannel() {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            for _ in 0..8 {
+                writer.write_sample(0i16).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        // 立体声不做静默混音：上游必须已经转成单声道，否则出错更该暴露。
+        assert!(wav_pcm16_samples(&cursor.into_inner()).is_err());
     }
 }

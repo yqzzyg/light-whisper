@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import type {
   ApiFormat,
+  AudioProbe,
   ContextMode,
   AppProfileRule,
   AppUpdateInfo,
@@ -728,6 +729,11 @@ export function pickFolder(): Promise<string | null> {
 /** 选择本地音频文件，返回路径；取消返回 null。 */
 export function pickAudioFile(): Promise<string | null> {
   return invokeCommand<string | null>("pick_audio_file");
+}
+
+/** 探测音频文件信息。只读容器头，不转写、不写历史。 */
+export function probeAudioFile(path: string): Promise<AudioProbe> {
+  return invokeCommand<AudioProbe>("probe_audio_file", { path });
 }
 
 /** 导入并转写音频，结果写入历史后返回该历史记录。 */

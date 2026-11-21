@@ -2,8 +2,11 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  importAudio: vi.fn(),
+  selectAudio: vi.fn(),
+  startImport: vi.fn(),
+  cancelSelection: vi.fn(),
   isImporting: false,
+  picked: null as { path: string; probe: Record<string, unknown> } | null,
   result: null as Record<string, unknown> | null,
   interimText: null as string | null,
   hideMainWindow: vi.fn(),
@@ -18,8 +21,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/hooks/useAudioImport", () => ({
   useAudioImport: () => ({
-    importAudio: mocks.importAudio,
+    selectAudio: mocks.selectAudio,
+    startImport: mocks.startImport,
+    cancelSelection: mocks.cancelSelection,
     isImporting: mocks.isImporting,
+    picked: mocks.picked,
     result: mocks.result,
     interimText: mocks.interimText,
   }),
@@ -42,7 +48,10 @@ vi.mock("sonner", () => ({
   toast: { success: mocks.toastSuccess, error: mocks.toastError },
 }));
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, vars?: Record<string, unknown>) =>
+      vars ? `${key}:${JSON.stringify(vars)}` : key,
+  }),
 }));
 
 import UploadPage from "@/pages/UploadPage";
@@ -64,10 +73,26 @@ function successRecord(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function pickedAudio(probeOverrides: Record<string, unknown> = {}) {
+  return {
+    path: "C:/audio/会议录音.mp3",
+    probe: {
+      durationSec: 317,
+      sizeBytes: 5 * 1024 * 1024,
+      sampleRate: 44100,
+      engine: "qwen3-asr-0.6b",
+      limitHint: null,
+      estimatedSecs: 80,
+      ...probeOverrides,
+    },
+  };
+}
+
 describe("UploadPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.isImporting = false;
+    mocks.picked = null;
     mocks.result = null;
     mocks.interimText = null;
   });
@@ -78,10 +103,49 @@ describe("UploadPage", () => {
     expect(screen.getByRole("button", { name: /upload.selectFile/ })).toBeTruthy();
   });
 
-  it("calls importAudio when the select button is clicked", () => {
+  it("selects a file without starting the transcription", () => {
     render(<UploadPage onNavigate={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /upload.selectFile/ }));
-    expect(mocks.importAudio).toHaveBeenCalledTimes(1);
+    expect(mocks.selectAudio).toHaveBeenCalledTimes(1);
+    expect(mocks.startImport).not.toHaveBeenCalled();
+  });
+
+  it("shows the picked file's duration, size and estimate before transcribing", () => {
+    mocks.picked = pickedAudio();
+    render(<UploadPage onNavigate={vi.fn()} />);
+
+    expect(screen.getByText("会议录音.mp3")).toBeTruthy();
+    expect(screen.getByText("5:17")).toBeTruthy();
+    expect(screen.getByText("5.0 MB")).toBeTruthy();
+    expect(screen.getByText(/upload.estimateMinutes/)).toBeTruthy();
+    expect(screen.getByText("upload.pickedTitle")).toBeTruthy();
+    // 选完不能自动开始：必须点「开始转写」。
+    expect(mocks.startImport).not.toHaveBeenCalled();
+  });
+
+  it("starts the transcription from the confirm step", () => {
+    mocks.picked = pickedAudio();
+    render(<UploadPage onNavigate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /upload.startTranscribe/ }));
+    expect(mocks.startImport).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks the start button when the engine cannot handle the file", () => {
+    mocks.picked = pickedAudio({ limitHint: "超过 GLM-ASR 的 30 秒上限" });
+    render(<UploadPage onNavigate={vi.fn()} />);
+
+    const button = screen.getByRole("button", { name: /upload.startTranscribe/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText("超过 GLM-ASR 的 30 秒上限")).toBeTruthy();
+    fireEvent.click(button);
+    expect(mocks.startImport).not.toHaveBeenCalled();
+  });
+
+  it("drops the picked file from the confirm step", () => {
+    mocks.picked = pickedAudio();
+    render(<UploadPage onNavigate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "upload.chooseAnother" }));
+    expect(mocks.cancelSelection).toHaveBeenCalledTimes(1);
   });
 
   it("disables the button and shows importing state while importing", () => {
@@ -90,7 +154,7 @@ describe("UploadPage", () => {
     const button = screen.getByRole("button", { name: /upload.importing/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     fireEvent.click(button);
-    expect(mocks.importAudio).not.toHaveBeenCalled();
+    expect(mocks.selectAudio).not.toHaveBeenCalled();
   });
 
   it("does not show a result preview before any import", () => {
@@ -154,11 +218,11 @@ describe("UploadPage", () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith("common.copiedToClipboard");
   });
 
-  it("starts another import from the result state", () => {
+  it("starts another selection from the result state", () => {
     mocks.result = successRecord();
     render(<UploadPage onNavigate={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /upload.importAnother/ }));
-    expect(mocks.importAudio).toHaveBeenCalledTimes(1);
+    expect(mocks.selectAudio).toHaveBeenCalledTimes(1);
   });
 
   it("applies the animation class to the page root", () => {

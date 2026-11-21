@@ -462,6 +462,9 @@
     "commands::audio_import::pick_audio_file": [
       "directory"
     ],
+    "commands::audio_import::probe_audio_file": [
+      "history"
+    ],
     "commands::audio_import::transcribe_imported_audio": [
       "history"
     ],
@@ -3488,6 +3491,7 @@
     "commands::history::export_transcription_history": "src-tauri/src/commands/history.rs#fn export_transcription_history(",
     "commands::history::reprocess_transcription_history": "src-tauri/src/commands/history.rs#fn reprocess_transcription_history(",
     "commands::audio_import::pick_audio_file": "src-tauri/src/commands/audio_import.rs#fn pick_audio_file(",
+    "commands::audio_import::probe_audio_file": "src-tauri/src/commands/audio_import.rs#fn probe_audio_file(",
     "commands::audio_import::transcribe_imported_audio": "src-tauri/src/commands/audio_import.rs#fn transcribe_imported_audio(",
     "commands::history::reveal_history_audio": "src-tauri/src/commands/history.rs#fn reveal_history_audio(",
     "commands::funasr::get_gpu_idle_seconds": "src-tauri/src/commands/funasr.rs#fn get_gpu_idle_seconds(",

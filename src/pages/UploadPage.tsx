@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import { ArrowLeft, FileAudio, LoaderCircle, Minus, NotebookPen, Upload, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -12,6 +13,34 @@ import { createNoteFromHistory } from "@/hooks/notesStore";
 
 type View = "main" | "settings" | "history" | "upload" | "notes";
 
+/** 取路径里最后一段，Windows 与 POSIX 分隔符都要认。 */
+function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** 时长按 `分:秒` 显示；容器给不出帧数时退回破折号。 */
+function formatDuration(seconds: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return "—";
+  const total = Math.round(seconds);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/** 预估耗时文案。在线引擎没有预估，显示说明而不是空着。 */
+function estimateLabel(t: TFunction, seconds: number | null): string {
+  if (seconds == null) return t("upload.estimateUnknown");
+  const total = Math.max(1, Math.round(seconds));
+  if (total < 60) return t("upload.estimateSeconds", { seconds: total });
+  return t("upload.estimateMinutes", {
+    minutes: Math.floor(total / 60),
+    seconds: total % 60,
+  });
+}
+
 export default function UploadPage({
   onNavigate,
   animClass = "",
@@ -20,7 +49,8 @@ export default function UploadPage({
   animClass?: string;
 }) {
   const { t } = useTranslation();
-  const { isImporting, result, interimText, importAudio } = useAudioImport();
+  const { isImporting, picked, result, interimText, selectAudio, startImport, cancelSelection }
+    = useAudioImport();
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -30,6 +60,8 @@ export default function UploadPage({
   const finalResult = result !== null && result.status !== "asr_error" && !!result.text;
   const hasResult = isStreaming || finalResult;
   const previewText = isStreaming ? interimText : finalResult ? result.text : null;
+  // 已选好文件、尚未开始：这一段显示文件信息与「开始转写」。
+  const awaitingConfirm = picked !== null && !isImporting && !hasResult;
 
   useEffect(() => () => {
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
@@ -62,6 +94,12 @@ export default function UploadPage({
     }
   }, [onNavigate, result, t]);
 
+  const selectButtonLabel = isImporting
+    ? "upload.importing"
+    : hasResult
+      ? "upload.importAnother"
+      : "upload.selectFile";
+
   return (
     <div className={`page-root upload-page ${animClass}`}>
       <TitleBar
@@ -85,22 +123,61 @@ export default function UploadPage({
       <div className={`page-content upload-content${hasResult ? " upload-content-with-result" : ""}`}>
         <div className="upload-card">
           <div className="upload-card-icon" aria-hidden="true">
-            {isImporting ? <LoaderCircle size={30} className="animate-spin" /> : <Upload size={30} strokeWidth={1.5} />}
-          </div>
-          <div className="upload-card-title">{t(isImporting ? "upload.importing" : "upload.cardTitle")}</div>
-          <p className="upload-card-hint">{t("upload.hint")}</p>
-          <button
-            type="button"
-            className="upload-select-btn"
-            onClick={() => void importAudio()}
-            disabled={isImporting}
-            aria-busy={isImporting}
-          >
             {isImporting
-              ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
-              : <FileAudio size={14} aria-hidden="true" />}
-            <span>{t(isImporting ? "upload.importing" : hasResult ? "upload.importAnother" : "upload.selectFile")}</span>
-          </button>
+              ? <LoaderCircle size={30} className="animate-spin" />
+              : picked
+                ? <FileAudio size={30} strokeWidth={1.5} />
+                : <Upload size={30} strokeWidth={1.5} />}
+          </div>
+          <div className="upload-card-title">
+            {t(isImporting ? "upload.importing" : awaitingConfirm ? "upload.pickedTitle" : "upload.cardTitle")}
+          </div>
+
+          {awaitingConfirm ? (
+            <>
+              <div className="upload-picked-name" title={picked.path}>{fileNameOf(picked.path)}</div>
+              <div className="upload-picked-meta">
+                <span>{formatDuration(picked.probe.durationSec)}</span>
+                <span aria-hidden="true">·</span>
+                <span>{formatSize(picked.probe.sizeBytes)}</span>
+                <span aria-hidden="true">·</span>
+                <span>{picked.probe.engine}</span>
+              </div>
+              <p className={`upload-picked-estimate${picked.probe.limitHint ? " is-warning" : ""}`}>
+                {picked.probe.limitHint ?? estimateLabel(t, picked.probe.estimatedSecs)}
+              </p>
+              <div className="upload-picked-actions">
+                <button
+                  type="button"
+                  className="upload-select-btn"
+                  onClick={() => void startImport()}
+                  disabled={picked.probe.limitHint !== null}
+                >
+                  <FileAudio size={14} aria-hidden="true" />
+                  <span>{t("upload.startTranscribe")}</span>
+                </button>
+                <button type="button" className="upload-ghost-btn" onClick={cancelSelection}>
+                  {t("upload.chooseAnother")}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="upload-card-hint">{t("upload.hint")}</p>
+              <button
+                type="button"
+                className="upload-select-btn"
+                onClick={() => void selectAudio()}
+                disabled={isImporting}
+                aria-busy={isImporting}
+              >
+                {isImporting
+                  ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+                  : <FileAudio size={14} aria-hidden="true" />}
+                <span>{t(selectButtonLabel)}</span>
+              </button>
+            </>
+          )}
         </div>
 
         {hasResult && previewText && (

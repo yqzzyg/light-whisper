@@ -691,22 +691,32 @@ pub async fn transcribe(
     app_handle: &tauri::AppHandle,
 ) -> Result<TranscriptionResult, AppError> {
     let _asr_guard = state.engine.native_asr_owner.lock().await;
+    transcribe_locked(state, audio_data, app_handle).await
+}
+
+/// [`transcribe`] 的无锁版本：调用方必须已持有 `native_asr_owner`。
+pub(crate) async fn transcribe_locked(
+    state: &AppState,
+    audio_data: Vec<u8>,
+    app_handle: &tauri::AppHandle,
+) -> Result<TranscriptionResult, AppError> {
     let hot_words = profile_hot_words(state);
     transcribe_wav_bytes_via_path(state, audio_data, hot_words, app_handle).await
 }
 
 /// 直接对磁盘上的 WAV 转写：不读进内存、不写临时副本。
 ///
-/// 会议录音本来就以 16k 单声道 WAV 落盘（一小时约 115MB），走
-/// [`transcribe`] 会先整段读进内存再写一份临时文件，白白多一次上百兆的拷贝。
-/// 预算与超时沿用 [`send_command_to_server_for_audio`]，与导入转写同一条曲线。
-pub async fn transcribe_path(
+/// 会议录音本来就以 16k 单声道 WAV 落盘（一小时约 115MB），走 [`transcribe`]
+/// 会先整段读进内存再写一份临时文件，白白多一次上百兆的拷贝。
+/// 调用方必须已持有 `native_asr_owner`：唯一的入口是
+/// `services::transcription_service::transcribe`，它在外层拿一次锁再按策略分派；
+/// `tokio::sync::Mutex` 不可重入，锁只能由调用方持有。
+pub(crate) async fn transcribe_path_locked(
     state: &AppState,
     audio_path: &std::path::Path,
     duration_sec: Option<f64>,
     app_handle: &tauri::AppHandle,
 ) -> Result<TranscriptionResult, AppError> {
-    let _asr_guard = state.engine.native_asr_owner.lock().await;
     let hot_words = profile_hot_words(state);
     let response = send_command_to_server_for_audio(
         state,
@@ -766,6 +776,18 @@ pub async fn transcribe_pcm16(
     app_handle: &tauri::AppHandle,
 ) -> Result<TranscriptionResult, AppError> {
     let _asr_guard = state.engine.native_asr_owner.lock().await;
+    transcribe_pcm16_locked(state, samples, sample_rate, app_handle).await
+}
+
+/// [`transcribe_pcm16`] 的无锁版本：调用方必须已持有 `native_asr_owner`。
+///
+/// 切片策略逐块调用它，整批只在外层取一次锁——每块重入会在第二块死锁。
+pub(crate) async fn transcribe_pcm16_locked(
+    state: &AppState,
+    samples: &[i16],
+    sample_rate: u32,
+    app_handle: &tauri::AppHandle,
+) -> Result<TranscriptionResult, AppError> {
     // 检查服务器是否就绪
     if !state.is_funasr_ready() {
         return Err(AppError::Asr(

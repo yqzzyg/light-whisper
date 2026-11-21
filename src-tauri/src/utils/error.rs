@@ -49,6 +49,22 @@ impl AppError {
             AppError::Other(_) => "other",
         }
     }
+
+    /// 只取具体原因，去掉「ASR错误:」这类类型前缀。
+    ///
+    /// 跨层拼文案时用：内层错误已经带了前缀，外层再加一句会变成
+    /// 「导入转写失败：ASR错误: xxx」，读起来像嵌套了两层故障。
+    /// 不带自定义文案的变体（IO / 序列化 / 取消）只能退回完整 Display。
+    pub fn message(&self) -> String {
+        match self {
+            AppError::Asr(message)
+            | AppError::Audio(message)
+            | AppError::Download(message)
+            | AppError::Tauri(message)
+            | AppError::Other(message) => message.clone(),
+            AppError::Io(_) | AppError::Serde(_) | AppError::Cancelled => self.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]

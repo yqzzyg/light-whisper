@@ -1,7 +1,10 @@
 # 笔记功能 — 方案调研与工作清单
 
 > 状态：P0–P4 全部完成，P5 已落「超长会议切片转写 / 历史 → 笔记反查 / 重新转写」，
-> 剩余全局搜索、回收站、拖拽排序、边录边转四项打磨 · 最后更新：2026-11-20
+> 剩余全局搜索、回收站、拖拽排序、边录边转四项打磨 · 最后更新：2026-11-21
+> 注：本文§3.3 的窄接口已被统一入口取代（见 `unified-transcription-service-plan.md`），
+> 文中符号同步为现行名称：`transcription_service::transcribe` 与
+> `funasr_service::transcribe_path_locked`。
 > 目标：左侧栏新增「笔记」，支持建立笔记目录、在目录下创建笔记；最终能在会议时录音并据此生成笔记。
 > 参考实现：`D:\MyData\Code\CodeWorkSpace\StudyProject\StudyAi\whisper\openwhispr`（桌面端 + 移动端）。
 
@@ -90,7 +93,7 @@ created_at, updated_at
 | 流式转写 | `transcription-result` 事件（`interim` 标记 + `sessionId`） | 仅作为可选的实时模式，一期不用 |
 | 采集原语 | `audio_service::spawn_audio_capture_thread(stop_flag, samples, device)`（返回设备采样率） | **笔记录音直接用它**：只采集、不转写 |
 | 重采样 | `audio_service::resample::ResamplerState`（`push_i16` 增量重采样到 16k） | 录音时按块重采样后再落盘，文件直接可用 |
-| 整段转写 | `funasr_service::transcribe`（WAV bytes → 临时文件 → IPC，已带长音频自适应超时）；`commands/audio_import.rs` 的 `transcribe_imported_audio`（解码 → 块式流式 → 存历史） | 新增窄接口「文件 → 文本」`transcription_service::transcribe_file`，直接传路径复用已有预算，见 §3.3 |
+| 整段转写 | `funasr_service::transcribe`（WAV bytes → 临时文件 → IPC，已带长音频自适应超时）；`commands/audio_import.rs` 的 `transcribe_imported_audio`（解码 → 块式流式 → 存历史） | 新增窄接口「文件 → 文本」`transcription_service::transcribe`，直接传路径复用已有预算，见 §3.3 |
 | 历史与音频 | `transcription_history` 表 + `history_audio/*.wav` + 启动时清孤儿（`history_service::cleanup_orphan_audio_files_with_connection`）+ 租约（启动清空） | 笔记音频**独立放 `notes_audio/`**，历史行 `audio_file` 留空、只做文本记录；不复用历史 GC |
 | LLM 调用 | `services/llm_client/*`（OpenAI / Anthropic / 兼容端点 SSE）、`assistant_service::generate_content` | 摘要生成走同一套 provider 配置与凭据 |
 | Markdown 渲染 | `react-markdown` + `remark-gfm` + `katex`（已依赖） | 摘要与笔记预览直接渲染 |
@@ -227,16 +230,16 @@ audio_file_names()                    -- 启动清理用的引用集合
 
 ```rust
 /// 文件 → 文本。不落库、不写历史、不复制音频。
-pub async fn transcribe_file(
-    state: &AppState,
+/// 现由统一入口承担：`transcription_service::transcribe`。
+pub async fn transcribe(
     app: &tauri::AppHandle,
-    path: &Path,
-    duration_sec: Option<f64>,   // 录音侧已知时长，省一次整文件读取
-    error_prefix: &str,
+    state: &AppState,
+    input: AudioInput<'_>,          // AudioInput::File(path)
+    options: TranscribeOptions<'_>, // duration_sec 由录音侧给，省一次整文件读取
 ) -> Result<TranscriptionResult, AppError>
 ```
 
-- 本地引擎 → 新增 `funasr_service::transcribe_path(state, app, path, duration_sec)`（约 25 行，直接下发 `audio_path`，路由与预算同 `transcribe_wav_bytes_via_path`）
+- 本地引擎 → 新增 `funasr_service::transcribe_path_locked(state, app, path, duration_sec)`（约 25 行，直接下发 `audio_path`，路由与预算同 `transcribe_wav_bytes_via_path`）
 - 在线引擎 → `check_engine_limit`（从 `audio_import.rs` 搬进 service）→ `glm_asr_service` / `alibaba_asr_service`
 - 不动 import 的流式路径：它的 interim 是上传页的产品特性，删它是另一个需求
 
@@ -244,7 +247,7 @@ pub async fn transcribe_file(
 
 | 位置 | 改动 |
 |---|---|
-| `services/funasr_service.rs` | 新增 `transcribe_path`（复用 `send_command_to_server_for_audio`） |
+| `services/funasr_service.rs` | 新增 `transcribe_path_locked`（复用 `send_command_to_server_for_audio`） |
 | `services/transcription_service.rs` | 新增：分派 + 在线上限 + 错误归一到 `AppError` |
 | `commands/audio_import.rs` | `check_engine_limit` 改为调用 service 版（单一来源），行为与文案不变 |
 | `services/history_service.rs` | **不动**：笔记音频在 `notes_audio/`，历史行的 `audio_file` 传 `None`；私有的 `safe_audio_path` / `cleanup_audio_if_unreferenced` 也无需提权 |
@@ -277,7 +280,7 @@ cancel(state)  -- 停止并删除文件（用户取消录音）
 ```
 audio_file = note_recordings.audio_file      -- 没有录音就报「这条笔记还没有录音」
 path = paths::safe_file_in_dir(&paths::notes_audio_dir(), &audio_file)?   -- 挡路径穿越
-result = transcription_service::transcribe_file(
+result = transcription_service::transcribe(
              state, app, path, Some(note.duration_sec), "转写失败")
 history_id = notes_service::save_recording_transcription(
                  recording_id, draft,
@@ -292,7 +295,7 @@ history_id = notes_service::save_recording_transcription(
 
 | 复用点 | 现状 | 要做什么 |
 |---|---|---|
-| `funasr_service::transcribe_wav_bytes_via_path` 的发送与预算逻辑 | 已带长音频自适应超时 | 抽出 `transcribe_path`，去掉临时文件那两步 |
+| `funasr_service::transcribe_wav_bytes_via_path` 的发送与预算逻辑 | 已带长音频自适应超时 | 抽出 `transcribe_path_locked`，去掉临时文件那两步 |
 | Python 端协议的 `audio_path` 字段 | 已支持 | 直接下发笔记录音路径，**不读字节、不复制** |
 | `check_engine_limit` | `audio_import.rs` 私有 | 搬进 `transcription_service`，在线引擎共用 |
 | `history_service::insert` + `HistoryDraft.audio_file` | `audio_file: Option<String>`，可传 `None` | 笔记写历史时传 `None`：音频在 `notes_audio/`，历史侧不需要也读不到它 |
@@ -377,7 +380,7 @@ history_id = notes_service::save_recording_transcription(
    → 录音中：转录 tab 显示「录音中 · 结束后可转文字」+ 计时/电平
    → 「停止」→ stop_note_recording：回填 wav 头，写 note_recordings.audio_file + duration_sec
    → 转录 tab 显示「转文字」按钮（此时笔记已有录音，可以直接播放/留存）
-   → 点「转文字」→ transcribe_note_recording：调 transcription_service::transcribe_file（只传路径）
+   → 点「转文字」→ transcribe_note_recording：调 transcription_service::transcribe（AudioInput::File）
    → 转写完：notes.transcript + history_id 落库，历史页出现一条 mode="note" 记录
    → 用户点「生成笔记」→ generate_note_summary → 流式写入「摘要」tab
 ```
@@ -467,8 +470,8 @@ history_id = notes_service::save_recording_transcription(
 
 阶段二：手动转写（已完成）
 
-- [x] `funasr_service::transcribe_path`：直接下发 `audio_path`（不加锁以外的额外拷贝，复用现有预算与超时）
-- [x] `transcription_service::transcribe_file`：分派本地/在线 + 在线上限 + 错误归一
+- [x] `funasr_service::transcribe_path_locked`：直接下发 `audio_path`（不加锁以外的额外拷贝，复用现有预算与超时）
+- [x] `transcription_service::transcribe`：分派本地/在线 + 在线上限 + 错误归一
 - [x] `check_engine_limit` 迁入 service，`audio_import.rs` 改为调用它（行为与文案不变）
 - [x] `transcribe_note_recording` 命令：逐段取路径 → 转写 → `save_recording_transcription`（历史行 + 段转录同一事务）
 - [x] 「转文字」按钮 / 已用时与预估 / 失败提示 / 幂等重试（重复点不产生第二条历史）
@@ -604,7 +607,7 @@ history_id = notes_service::save_recording_transcription(
 4. 摘要时机：**只手动点「生成笔记」**，不做自动生成。
 5. 录音方式：**默认先录后转**——录音期间只采集落盘、不跑流式 ASR。理由是长会议全程实时推理耗电明显，而摘要基于最终全文、实时结果没有增量价值。
 6. 转写时机：**停止录音只保存文件，用户点「转文字」才转写**。好处是录坏/录空的不浪费算力、失败重试就是再点一次、不用引入「待转写」中间态。
-7. 转写复用的粒度：**不做全量收口**。现存三处分派是三种执行策略（听写兜底 / 上传页 interim 预览 / 历史重新识别），合成一个带回调的万能函数，省下的只是每处 6 行 `match`，却把两条主流程的回归面绑在一起。只加一个窄接口 `transcription_service::transcribe_file(path, duration)`：本地引擎经新增的 `funasr_service::transcribe_path` **直接下发文件路径**（Python 端协议已支持 `audio_path` 字段，不读字节、不写临时文件），在线引擎走 `check_engine_limit` + 既有在线 service。
+7. 转写复用的粒度：**不做全量收口**。现存三处分派是三种执行策略（听写兜底 / 上传页 interim 预览 / 历史重新识别），合成一个带回调的万能函数，省下的只是每处 6 行 `match`，却把两条主流程的回归面绑在一起。只加一个窄接口 `transcription_service::transcribe(path, duration)`：本地引擎经新增的 `funasr_service::transcribe_path_locked` **直接下发文件路径**（Python 端协议已支持 `audio_path` 字段，不读字节、不写临时文件），在线引擎走 `check_engine_limit` + 既有在线 service。
 8. 音频归属：录音写进**独立目录 `notes_audio/`**，`note_recordings.audio_file` 存文件名，转写只传绝对路径、不复制、不读字节；写历史行时 `audio_file` 传 `None`，历史只保留文本记录。决定依据：`history_audio/` 在 `initialize()` 会清孤儿（先清空租约表再扫目录），未转写的录音重启即丢；独立目录则回收责任明确归笔记，代价是删笔记/删目录/启动清残留三处要自己实现。
 9. 多段语义：一条笔记的多次录音**全部保留**，由 `note_recordings` 子表持有；`notes` 表不持有音频引用。选子表而非把多段塞进 JSON：要按段查未转写、按段删、给启动 GC 提供引用集合。转录是段级幂等 + 拼接，不做整段合并转写（那要在磁盘临时拼 WAV，违背零复制，且失败无法单段重试）。
 10. 存储口径：**`notes.content` 始终是 markdown 原文**，无论编辑器内部是什么形态。导出、搜索、摘要、列表摘要全部照旧。

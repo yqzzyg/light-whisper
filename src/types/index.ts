@@ -321,6 +321,25 @@ export interface PersistentHistoryRecord {
   reprocessedFromId?: number | null;
 }
 
+/**
+ * 音频文件信息，对应后端 `commands::audio_import::AudioProbe`。
+ *
+ * 上传页在「选完文件」与「开始转写」之间展示这些字段：让用户在等待之前就知道
+ * 这段音频多长、要等多久、当前引擎能不能转。
+ */
+export interface AudioProbe {
+  /** 容器声明的时长；少数 mp3 拿不到帧数信息时为 null。 */
+  durationSec: number | null;
+  sizeBytes: number;
+  /** 源文件采样率；转写时会统一重采样到 16k。 */
+  sampleRate: number;
+  engine: string;
+  /** 当前引擎转不了时的拦截文案；null 表示可以转。 */
+  limitHint: string | null;
+  /** 预估转写耗时（秒）；在线引擎依赖网络，为 null。 */
+  estimatedSecs: number | null;
+}
+
 export interface PersistentHistoryFilter {
   query?: string;
   mode?: "" | RecordingMode;

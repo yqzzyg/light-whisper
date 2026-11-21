@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => {
   const handlers = new Set<(event: { payload: Record<string, unknown> }) => void>();
   return {
     pickAudioFile: vi.fn(),
+    probeAudioFile: vi.fn(),
     transcribeImportedAudio: vi.fn(),
     toastSuccess: vi.fn(),
     toastError: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/api/tauri", () => ({
   pickAudioFile: mocks.pickAudioFile,
+  probeAudioFile: mocks.probeAudioFile,
   transcribeImportedAudio: mocks.transcribeImportedAudio,
 }));
 
@@ -64,12 +66,37 @@ function successRecord(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function probe(overrides: Record<string, unknown> = {}) {
+  return {
+    durationSec: 317,
+    sizeBytes: 5 * 1024 * 1024,
+    sampleRate: 44100,
+    engine: "qwen3-asr-0.6b",
+    limitHint: null,
+    estimatedSecs: 80,
+    ...overrides,
+  };
+}
+
+type Hook = { current: ReturnType<typeof useAudioImport> };
+
+/** 走完「选文件 → 探测 → 开始转写」两步。 */
+async function pickAndStart(result: Hook) {
+  await act(async () => {
+    await result.current.selectAudio();
+  });
+  await act(async () => {
+    await result.current.startImport();
+  });
+}
+
 describe("useAudioImport", () => {
   beforeEach(() => {
     // 状态在模块级，用例之间必须显式重置。
     resetAudioImportStoreForTests();
     vi.clearAllMocks();
     mocks.pickAudioFile.mockResolvedValue("C:/audio/test.wav");
+    mocks.probeAudioFile.mockResolvedValue(probe());
     mocks.transcribeImportedAudio.mockResolvedValue(successRecord());
   });
 
@@ -79,48 +106,108 @@ describe("useAudioImport", () => {
     mocks.clearHandlers();
   });
 
+  it("only probes on selection and waits for an explicit start", async () => {
+    const { result } = renderHook(() => useAudioImport());
+
+    await act(async () => {
+      await result.current.selectAudio();
+    });
+
+    expect(mocks.probeAudioFile).toHaveBeenCalledWith("C:/audio/test.wav");
+    expect(result.current.picked).toEqual({
+      path: "C:/audio/test.wav",
+      probe: probe(),
+    });
+    // 选完文件不自动转写：用户要先看到时长与预估。
+    expect(mocks.transcribeImportedAudio).not.toHaveBeenCalled();
+    expect(result.current.isImporting).toBe(false);
+  });
+
   it("cancels silently when the user dismisses the picker", async () => {
     mocks.pickAudioFile.mockResolvedValue(null);
     const { result } = renderHook(() => useAudioImport());
 
     await act(async () => {
-      await result.current.importAudio();
+      await result.current.selectAudio();
     });
 
-    expect(mocks.transcribeImportedAudio).not.toHaveBeenCalled();
-    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(mocks.probeAudioFile).not.toHaveBeenCalled();
+    expect(result.current.picked).toBeNull();
     expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it("reports a probe failure without entering the confirm step", async () => {
+    mocks.probeAudioFile.mockRejectedValue(new Error("音频格式探测失败"));
+    const { result } = renderHook(() => useAudioImport());
+
+    await act(async () => {
+      await result.current.selectAudio();
+    });
+
+    expect(mocks.toastError).toHaveBeenCalled();
+    expect(result.current.picked).toBeNull();
+  });
+
+  it("refuses to start when the engine cannot handle the file", async () => {
+    mocks.probeAudioFile.mockResolvedValue(
+      probe({ limitHint: "音频约 317 秒，超过 GLM-ASR 的 30 秒上限" }),
+    );
+    const { result } = renderHook(() => useAudioImport());
+
+    await act(async () => {
+      await result.current.selectAudio();
+    });
+    await act(async () => {
+      await result.current.startImport();
+    });
+
+    // 拦截文案在 UI 里已经显示，这里不再发请求。
+    expect(mocks.transcribeImportedAudio).not.toHaveBeenCalled();
     expect(result.current.isImporting).toBe(false);
+  });
+
+  it("drops the selection when the user chooses another file", async () => {
+    const { result } = renderHook(() => useAudioImport());
+
+    await act(async () => {
+      await result.current.selectAudio();
+    });
+    act(() => {
+      result.current.cancelSelection();
+    });
+
+    expect(result.current.picked).toBeNull();
   });
 
   it("keeps the transcribed result for preview instead of a success toast", async () => {
     const { result } = renderHook(() => useAudioImport());
 
-    await act(async () => {
-      await result.current.importAudio();
-    });
+    await pickAndStart(result);
 
     expect(mocks.transcribeImportedAudio).toHaveBeenCalledWith("C:/audio/test.wav");
     expect(result.current.result).toEqual(successRecord());
     // 结果已在上传页预览，不再用 toast 重复告知。
     expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    // 转完就收起选中态，卡片回到「再传一个」。
+    expect(result.current.picked).toBeNull();
     expect(result.current.isImporting).toBe(false);
   });
 
   it("clears the previous result as soon as a new import starts", async () => {
     const { result } = renderHook(() => useAudioImport());
-    await act(async () => {
-      await result.current.importAudio();
-    });
+    await pickAndStart(result);
     expect(result.current.result).not.toBeNull();
 
     let resolveTranscribe!: (value: unknown) => void;
     mocks.transcribeImportedAudio.mockImplementation(
       () => new Promise((resolve) => { resolveTranscribe = resolve; }),
     );
+    await act(async () => {
+      await result.current.selectAudio();
+    });
     let pending!: Promise<void>;
     act(() => {
-      pending = result.current.importAudio();
+      pending = result.current.startImport();
     });
     await waitFor(() => expect(result.current.result).toBeNull());
     await act(async () => {
@@ -130,51 +217,48 @@ describe("useAudioImport", () => {
     expect(result.current.result?.text).toBe("新结果");
   });
 
-  it("shows an error toast when the record is asr_error", async () => {
+  it("shows an error toast when the record is asr_error and keeps the selection", async () => {
     mocks.transcribeImportedAudio.mockResolvedValue(
       successRecord({ status: "asr_error", error: "音频过长" }),
     );
     const { result } = renderHook(() => useAudioImport());
 
-    await act(async () => {
-      await result.current.importAudio();
-    });
+    await pickAndStart(result);
 
     expect(mocks.toastError).toHaveBeenCalled();
     expect(mocks.toastSuccess).not.toHaveBeenCalled();
     expect(result.current.result).toBeNull();
+    // 同一份文件可以直接重试，不必重新选。
+    expect(result.current.picked).not.toBeNull();
   });
 
   it("shows an error toast when the command rejects", async () => {
     mocks.transcribeImportedAudio.mockRejectedValue(new Error("解码失败"));
     const { result } = renderHook(() => useAudioImport());
 
-    await act(async () => {
-      await result.current.importAudio();
-    });
+    await pickAndStart(result);
 
     expect(mocks.toastError).toHaveBeenCalled();
     await waitFor(() => expect(result.current.isImporting).toBe(false));
   });
 
-  it("ignores concurrent clicks while importing", async () => {
+  it("ignores a second start while the first is running", async () => {
     let resolveTranscribe!: (value: unknown) => void;
     mocks.transcribeImportedAudio.mockImplementation(
       () => new Promise((resolve) => { resolveTranscribe = resolve; }),
     );
     const { result } = renderHook(() => useAudioImport());
+    await act(async () => {
+      await result.current.selectAudio();
+    });
 
     let first!: Promise<void>;
     let second!: Promise<void>;
     act(() => {
-      first = result.current.importAudio();
-      second = result.current.importAudio();
+      first = result.current.startImport();
+      second = result.current.startImport();
     });
-    // 等第一个调用真正进入 transcribe（pickAudioFile 是异步的）。
-    await waitFor(() => {
-      expect(mocks.transcribeImportedAudio).toHaveBeenCalledTimes(1);
-      expect(resolveTranscribe).toBeTypeOf("function");
-    });
+    await waitFor(() => expect(mocks.transcribeImportedAudio).toHaveBeenCalledTimes(1));
     await act(async () => {
       resolveTranscribe(successRecord());
       await Promise.all([first, second]);
@@ -189,10 +273,13 @@ describe("useAudioImport", () => {
       () => new Promise((resolve) => { resolveTranscribe = resolve; }),
     );
     const { result } = renderHook(() => useAudioImport());
+    await act(async () => {
+      await result.current.selectAudio();
+    });
 
     let pending!: Promise<void>;
     act(() => {
-      pending = result.current.importAudio();
+      pending = result.current.startImport();
     });
     await waitFor(() => expect(mocks.transcribeImportedAudio).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(mocks.handlerCount()).toBeGreaterThan(0));
@@ -215,9 +302,7 @@ describe("useAudioImport", () => {
 
   it("keeps the result after the page unmounts and mounts again", async () => {
     const first = renderHook(() => useAudioImport());
-    await act(async () => {
-      await first.result.current.importAudio();
-    });
+    await pickAndStart(first.result);
     expect(first.result.current.result?.text).toBe("你好");
 
     // 模拟左侧栏切走：只有当前页面挂载，UploadPage 会被卸载。
@@ -228,16 +313,30 @@ describe("useAudioImport", () => {
     expect(second.result.current.isImporting).toBe(false);
   });
 
+  it("keeps the picked file when the page unmounts before starting", async () => {
+    const first = renderHook(() => useAudioImport());
+    await act(async () => {
+      await first.result.current.selectAudio();
+    });
+    first.unmount();
+
+    const second = renderHook(() => useAudioImport());
+    expect(second.result.current.picked?.path).toBe("C:/audio/test.wav");
+  });
+
   it("finishes the import even if the page unmounts mid-way", async () => {
     let resolveTranscribe!: (value: unknown) => void;
     mocks.transcribeImportedAudio.mockImplementation(
       () => new Promise((resolve) => { resolveTranscribe = resolve; }),
     );
     const first = renderHook(() => useAudioImport());
+    await act(async () => {
+      await first.result.current.selectAudio();
+    });
 
     let pending!: Promise<void>;
     act(() => {
-      pending = first.result.current.importAudio();
+      pending = first.result.current.startImport();
     });
     await waitFor(() => expect(mocks.transcribeImportedAudio).toHaveBeenCalledTimes(1));
 

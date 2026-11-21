@@ -2,22 +2,27 @@ import { useCallback, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  cancelSelection as cancelSelectionInStore,
   getAudioImportSnapshot,
-  startAudioImport,
+  selectAudio as selectAudioInStore,
+  startImport as startImportInStore,
   subscribeAudioImport,
   type AudioImportState,
 } from "./audioImportStore";
 
 export interface UseAudioImportReturn extends AudioImportState {
-  importAudio: () => Promise<void>;
+  /** 选择文件并读取时长等信息，不发起转写。 */
+  selectAudio: () => Promise<void>;
+  /** 转写已选中的文件。 */
+  startImport: () => Promise<void>;
+  cancelSelection: () => void;
 }
 
 /**
- * 导入音频转写：选择文件 → 转写 → 写入历史，并把结果留在上传页预览。
+ * 导入音频转写：选择文件 → 确认信息 → 转写 → 写入历史，结果留在上传页预览。
  *
- * 本地引擎边转边推 interim（负数 sessionId），只接收负数 sessionId 的中间结果
- * ——浮层与录音主界面都会忽略它们，导入字幕不会串到别处。
- * 在线引擎不支持流式，转完一次性出结果。结果不回灌主结果区、不自动粘贴。
+ * 分两步是有意的：选完文件先显示时长与预估耗时，用户可以决定现在转还是换一个，
+ * 不必点一下等两分钟才发现选错文件。
  *
  * 状态存放在模块级 store（见 audioImportStore.ts），左侧栏切走再回来不会丢失，
  * 转写在离开页面期间也会继续跑完。
@@ -29,7 +34,9 @@ export function useAudioImport(): UseAudioImportReturn {
     getAudioImportSnapshot,
     getAudioImportSnapshot,
   );
-  const importAudio = useCallback(() => startAudioImport(t), [t]);
+  const selectAudio = useCallback(() => selectAudioInStore(t), [t]);
+  const startImport = useCallback(() => startImportInStore(t), [t]);
+  const cancelSelection = useCallback(() => cancelSelectionInStore(), []);
 
-  return { ...state, importAudio };
+  return { ...state, selectAudio, startImport, cancelSelection };
 }
