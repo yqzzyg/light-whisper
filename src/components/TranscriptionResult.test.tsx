@@ -9,9 +9,9 @@ vi.mock("react-i18next", () => ({
       if (key === "result.stats") {
         return `${vars?.chars} chars · ${vars?.duration}s · ${vars?.cpm} chars/min`;
       }
-      if (key === "result.latency.asr") return `ASR ${vars?.ms}ms`;
-      if (key === "result.latency.ai") return `AI ${vars?.ms}ms`;
-      if (key === "result.latency.total") return `total ${vars?.ms}ms`;
+      if (key === "result.latency.asr") return `ASR ${vars?.seconds}s`;
+      if (key === "result.latency.ai") return `polish ${vars?.seconds}s`;
+      if (key === "result.latency.total") return `total ${vars?.seconds}s`;
       return key;
     },
   }),
@@ -30,7 +30,7 @@ describe("TranscriptionResult", () => {
     expect(screen.queryByText("result.recognizingSpeech")).not.toBeInTheDocument();
     expect(screen.getByLabelText("result.editableTranscription")).toHaveValue("next result");
   });
-  it("shows ASR, AI polish, and total latency when timing is available", () => {
+  it("shows ASR, polish and total latency in seconds when timing is available", () => {
     render(
       <TranscriptionResult
         text="hello"
@@ -40,13 +40,13 @@ describe("TranscriptionResult", () => {
         onCopy={vi.fn()}
         durationSec={1.2}
         charCount={5}
-        timing={{ asrMs: 42, polishMs: 900, totalMs: 948 }}
+        timing={{ asrMs: 42, polishMs: 1900, totalMs: 2060 }}
       />,
     );
 
-    expect(screen.getByText(/ASR 42ms/)).toBeInTheDocument();
-    expect(screen.getByText(/AI 900ms/)).toBeInTheDocument();
-    expect(screen.getByText(/total 948ms/)).toBeInTheDocument();
+    expect(screen.getByText(/ASR 0\.04s/)).toBeInTheDocument();
+    expect(screen.getByText(/polish 1\.9s/)).toBeInTheDocument();
+    expect(screen.getByText(/total 2\.1s/)).toBeInTheDocument();
   });
 
   it("auto-grows the result body to fit long wrapped content", () => {

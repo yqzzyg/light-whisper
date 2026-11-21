@@ -299,9 +299,9 @@ const en: TranslationSchema = {
     recognizingSpeech: "Recognizing speech...",
     stats: "{{chars}} chars · {{duration}}s · {{cpm}} chars/min",
     latency: {
-      asr: "ASR {{ms}}ms",
-      ai: "AI {{ms}}ms",
-      total: "total {{ms}}ms",
+      asr: "ASR {{seconds}}s",
+      ai: "polish {{seconds}}s",
+      total: "total {{seconds}}s",
     },
     editableTranscription: "Transcription result, editable",
     expandAll: "Show all",

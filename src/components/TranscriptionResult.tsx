@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect, useLayoutEffect, useState, type UIEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Copy, Check, ChevronDown, ChevronUp } from "lucide-react";
+import { formatLatencySeconds } from "@/lib/duration";
 import type { EditGrabStatus, TranscriptionTiming } from "@/types";
 
 interface TranscriptionResultProps {
@@ -45,10 +46,15 @@ export default function TranscriptionResult({
       ? `result.editGrab.${editGrabStatus}`
       : null;
   const latencyParts = [
-    timing?.asrMs != null ? t("result.latency.asr", { ms: timing.asrMs }) : null,
-    timing?.polishMs != null ? t("result.latency.ai", { ms: timing.polishMs }) : null,
-    timing?.totalMs != null ? t("result.latency.total", { ms: timing.totalMs }) : null,
-  ].filter((part): part is string => !!part);
+    { key: "result.latency.asr", ms: timing?.asrMs },
+    { key: "result.latency.ai", ms: timing?.polishMs },
+    { key: "result.latency.total", ms: timing?.totalMs },
+  ]
+    .map(({ key, ms }) => {
+      const seconds = formatLatencySeconds(ms);
+      return seconds === null ? null : t(key, { seconds });
+    })
+    .filter((part): part is string => !!part);
   const showMeta = hasStats || editGrabHintKey || latencyParts.length > 0;
 
   useEffect(() => {

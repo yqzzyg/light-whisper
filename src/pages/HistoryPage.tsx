@@ -50,6 +50,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 统计面板是技术指标（P50/P95），一秒以内保留毫秒精度更有意义，
+ * 一秒以上才折算成秒。这与结果卡片「一律按秒」的口径不同，是刻意的。
+ */
 function formatLatency(ms?: number | null): string {
   if (ms == null) return "—";
   return ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10_000 ? 1 : 2)}s` : `${ms}ms`;
