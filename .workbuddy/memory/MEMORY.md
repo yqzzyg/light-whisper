@@ -43,9 +43,10 @@
 
 ## 笔记转写（P3 阶段二）
 
-- 所有 ASR 分派只走 `services/transcription_service.rs`：唯一入口 `transcribe(app, state, AudioInput, TranscribeOptions)`，按 `AudioInput::{WavBytes, File}` + `Preview` 选 `Whole` / `Streaming` / `Chunked`。命令层不要再自己 match 引擎。
+- 所有 ASR 分派只走 `services/transcription_service.rs`：唯一入口 `transcribe(app, state, AudioInput, TranscribeOptions)`，按 `AudioInput::{WavBytes, File}` + 时长选 `Whole` / `Chunked`。命令层不要再自己 match 引擎。2026-11-21 已删掉 `Streaming` 策略（它只服务上传页的渐进文字）。
 - 笔记转写**必须直传路径**（`AudioInput::File`），不要为了「统一」「省一次解码」把一小时 WAV 读进内存。2026-11-20 的约束是「Python 端整段读入 + PCM 全量驻留」；改流式反而更费：Rust 侧要持 i16（1 小时 115MB），Python 的 `_chunks` 再留 float32（230MB），`finish` 里 `concatenate` 峰值再加一份。
-- 长录音靠**切片**控内存，不靠流式：`WavChunker` 流式读文件，峰值恒定单块。流式只用于上传页的实时预览（1 秒块），不用于长录音转写。
+- 长录音靠**切片**控内存，不靠流式：`WavChunker` 流式读文件，峰值恒定单块。上传页的实时预览也已于 2026-11-21 去掉（见 `unified-transcription-service-plan.md` §11），现在只有实时听写用原生流式。
+- 上传也走「先落盘再转写」：`save_audio` 排在 `transcribe` 之前，音频路径直接交给转录层，失败再 `discard_audio` 回滚。**不要改回 `WavBytes`**——那会让 Rust 侧多留一份整段 WAV，长音频还失去切片。
 - 幂等规则：`transcribe_note_recording` 默认只转 `transcript` 为空的段；**转写失败不写历史**（成功才 insert），所以重试永远只有一条历史行。`force=true` 是「重新转写」，会覆盖已有转录并**就地更新**该段原来的历史行（不追加重复记录）。
 - 历史行的 `mode="note"` 且 `audio_file=NULL`：音频归笔记，写进历史会让历史 GC 删掉笔记唯一的录音。
 - 并发保护是后端 `AppState.note_transcription` 原子占位，不要只靠前端按钮 `disabled`。
