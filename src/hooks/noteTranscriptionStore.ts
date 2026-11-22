@@ -7,17 +7,6 @@ import {
 } from "@/api/tauri";
 import { reloadOpenNote, refreshNotes } from "@/hooks/notesStore";
 
-/**
- * 本地引擎实测约 19 倍实时。
- *
- * 只用来给「大概还要多久」的预估，不做假进度条：整段转写是引擎内的黑盒，
- * 前端唯一确定的信息就是已经等了多久。
- */
-export const TRANSCRIBE_REALTIME_FACTOR = 19;
-
-/** 预估下限：再短的录音也要几秒，显示「0 秒」反而像已经卡住。 */
-const MIN_ESTIMATE_SECONDS = 5;
-
 export interface NoteTranscriptionError {
   noteId: number;
   message: string;
@@ -120,14 +109,6 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   return String(error);
-}
-
-/** 按录音时长给一个预估秒数；时长未知（老数据）时返回 `null`，界面就不显示预估。 */
-export function estimateTranscribeSeconds(
-  durationSec: number | null | undefined,
-): number | null {
-  if (!durationSec || !Number.isFinite(durationSec) || durationSec <= 0) return null;
-  return Math.max(MIN_ESTIMATE_SECONDS, Math.round(durationSec / TRANSCRIBE_REALTIME_FACTOR));
 }
 
 export function subscribeNoteTranscription(listener: () => void): () => void {

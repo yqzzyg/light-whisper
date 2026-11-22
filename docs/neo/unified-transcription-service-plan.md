@@ -424,4 +424,18 @@ import_audio_to_wav(源文件) → save_audio(先落盘) → AudioInput::File(�
 
 切片阈值还是 2 小时（`CHUNK_THRESHOLD_SECS`），§10 提的「切片常态化」没有动。
 现在上传与笔记一样，10 分钟到 2 小时之间会走整段路径，按实测 0.26–0.39 倍实时外推，
-超过约 21–31 分钟就会撞 `dur/10 + 120` 的预算。
+超过约 21–31 分钟会明显变慢；超时判据见 §12。
+
+## 12. 超时改为无进展窗口（2026-11-22 追加）
+
+超时判据是「引擎是否还在回报进展」：
+
+- **Python**：`server_common.py` 的 `ProgressHeartbeat` 在每条命令期间输出
+  `{"type":"progress","request_id":...,"stage":...,"elapsed_ms":...}`，默认 15 秒一次；
+  引擎另在 VAD / ASR 阶段边界补发真实进度。心跳写的是 `run()` 捕获的原始 stdout，
+  不受 native 推理时 `StdoutSuppressor` 的影响。
+- **Rust**：`read_json_response_matching` 的 timeout 是滑动窗口，每次收到任意
+  stdout 行就重新开始计时；进度消息在 JSON 值层被过滤，不会被误认为带 `request_id`
+  的最终响应。写 stdin 另有独立的无进展窗口，管道写满不会无限挂起。
+
+§10 的「切片常态化」仍未做：它解决峰值内存与块边界问题，与本节的超时判据独立。

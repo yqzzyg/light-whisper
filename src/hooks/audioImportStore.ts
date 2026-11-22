@@ -71,8 +71,8 @@ function errorMessage(error: unknown): string {
 /**
  * 选择音频并探测信息，不发起转写。
  *
- * 选完文件立刻能拿到时长与预估耗时，用户可以判断要不要等——比点了按钮等两分钟
- * 才发现文件选错要好。探测失败（格式不支持、文件损坏）在这里就报错，不进入下一步。
+ * 选完文件立刻能拿到时长，用户可以确认自己选对了文件；探测失败（格式不支持、
+ * 文件损坏）在这里就报错，不进入下一步。
  */
 export async function selectAudio(t: TFunction): Promise<void> {
   if (busy) return;

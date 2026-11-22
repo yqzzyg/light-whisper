@@ -56,7 +56,6 @@ function probe(overrides: Record<string, unknown> = {}) {
     sampleRate: 44100,
     engine: "qwen3-asr-0.6b",
     limitHint: null,
-    estimatedSecs: 80,
     ...overrides,
   };
 }
@@ -100,7 +99,7 @@ describe("useAudioImport", () => {
       path: "C:/audio/test.wav",
       probe: probe(),
     });
-    // 选完文件不自动转写：用户要先看到时长与预估。
+    // 选完文件不自动转写：用户要先确认文件信息。
     expect(mocks.transcribeImportedAudio).not.toHaveBeenCalled();
     expect(result.current.isImporting).toBe(false);
   });

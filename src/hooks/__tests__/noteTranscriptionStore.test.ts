@@ -26,7 +26,6 @@ const events = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import {
-  estimateTranscribeSeconds,
   getNoteTranscriptionSnapshot,
   resetNoteTranscriptionForTests,
   transcribeNote,
@@ -155,16 +154,6 @@ describe("noteTranscriptionStore", () => {
     });
     expect(getNoteTranscriptionSnapshot().recordingId).toBeNull();
     expect(notes.reloadOpenNote).not.toHaveBeenCalled();
-  });
-
-  it("estimates a wall-clock time from the recorded duration", () => {
-    // 19× 实时：10 分钟录音约 32 秒。
-    expect(estimateTranscribeSeconds(600)).toBe(32);
-    // 极短录音给下限，避免显示「0 秒」像卡住。
-    expect(estimateTranscribeSeconds(6)).toBe(5);
-    expect(estimateTranscribeSeconds(null)).toBeNull();
-    expect(estimateTranscribeSeconds(0)).toBeNull();
-    expect(estimateTranscribeSeconds(Number.NaN)).toBeNull();
   });
 
   it("tracks chunk progress for a long recording and clears it when done", async () => {

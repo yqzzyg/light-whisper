@@ -80,7 +80,6 @@ function pickedAudio(probeOverrides: Record<string, unknown> = {}) {
       sampleRate: 44100,
       engine: "qwen3-asr-0.6b",
       limitHint: null,
-      estimatedSecs: 80,
       ...probeOverrides,
     },
   };
@@ -107,14 +106,13 @@ describe("UploadPage", () => {
     expect(mocks.startImport).not.toHaveBeenCalled();
   });
 
-  it("shows the picked file's duration, size and estimate before transcribing", () => {
+  it("shows the picked file's duration and size before transcribing", () => {
     mocks.picked = pickedAudio();
     render(<UploadPage onNavigate={vi.fn()} />);
 
     expect(screen.getByText("会议录音.mp3")).toBeTruthy();
     expect(screen.getByText("5:17")).toBeTruthy();
     expect(screen.getByText("5.0 MB")).toBeTruthy();
-    expect(screen.getByText(/upload.estimateMinutes/)).toBeTruthy();
     expect(screen.getByText("upload.pickedTitle")).toBeTruthy();
     // 选完不能自动开始：必须点「开始转写」。
     expect(mocks.startImport).not.toHaveBeenCalled();

@@ -21,7 +21,7 @@ export interface UseAudioImportReturn extends AudioImportState {
 /**
  * 导入音频转写：选择文件 → 确认信息 → 转写 → 写入历史，结果留在上传页预览。
  *
- * 分两步是有意的：选完文件先显示时长与预估耗时，用户可以决定现在转还是换一个，
+ * 分两步是有意的：选完文件先显示文件信息，用户可以决定现在转还是换一个，
  * 不必点一下等两分钟才发现选错文件。
  *
  * 状态存放在模块级 store（见 audioImportStore.ts），左侧栏切走再回来不会丢失，

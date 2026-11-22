@@ -23,6 +23,7 @@
 - `user_profile.rs` 划词排除项默认值含 `minutes.exe`（否则划词助手弹在自己窗口上）；但老用户 `user_profile.json` 里仍是 `light-whisper.exe`，**迁移 `excluded_apps` 仍未做**，是已知遗留风险。
 - `capabilities/main.json` 必须有 `core:window:allow-set-title`：`core:window:default` 只含读标题，不含写，缺了 `setTitle` 会静默失败。
 - 窗口标题随语言切换靠 `main.tsx` 里的 `getCurrentWindow().setTitle(t("app.title"))`，`tauri.conf.json` 的静态 title 只是启动瞬间的兜底。
+- ASR IPC 超时是「无进展窗口」（2026-11-22 改造）：Python 每 15s 发 `{"type":"progress"}`，Rust 每次 stdout 行重置窗口；`long_audio_*` 预算参数/逻辑已删，不要再按音频时长算总预算。进度消息带 `request_id`，必须在 JSON 值层过滤，否则会被误当最终响应；写 stdin 也必须有独立窗口，否则管道写满会永久挂起。
 
 ## 工程约定
 

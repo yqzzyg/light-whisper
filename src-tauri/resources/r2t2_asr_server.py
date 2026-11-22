@@ -290,6 +290,7 @@ class R2T2ASRServer(ASRStreamServerMixin, BaseASRServer):
                 chunk_samples=max(1, int(getattr(self.native, "chunk_samples", 5120))),
                 max_segment_samples=None,
             )
+            self.report_progress("asr_start", duration=round(float(duration), 3))
             started = time.perf_counter()
             with self.stdout_suppressor.suppress():
                 segmented.start(context=context, language=language)
@@ -300,6 +301,7 @@ class R2T2ASRServer(ASRStreamServerMixin, BaseASRServer):
                     segmented.feed(audio[start : start + chunk_samples])
                 text, detected_language = segmented.finish()
             inference_ms = (time.perf_counter() - started) * 1000
+            self.report_progress("asr_done", inference_ms=round(inference_ms, 3))
             language = detected_language or language
             self.total_audio_duration += float(duration)
             self.transcription_count += 1

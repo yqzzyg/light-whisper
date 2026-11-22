@@ -139,21 +139,25 @@ impl ServerResponse {
     }
 }
 
+/// 读取一行 JSON，超时窗口在每次收到 stdout 数据时重新开始计时。
+///
+/// 本地引擎推理期间会发 `{"type":"progress", ...}` 保活消息；这里的 timeout
+/// 是无进展窗口：持续有输出就继续等，只有卡死才在窗口内报错。
 pub(super) async fn read_json_response<T, R>(
     reader: &mut R,
-    timeout: Duration,
+    idle_timeout: Duration,
     context: &str,
 ) -> Result<T, AppError>
 where
     T: for<'de> Deserialize<'de>,
     R: AsyncBufRead + Unpin,
 {
-    read_json_response_matching(reader, timeout, context, |_| true).await
+    read_json_response_matching(reader, idle_timeout, context, |_| true).await
 }
 
 pub(super) async fn read_json_response_matching<T, R>(
     reader: &mut R,
-    timeout: Duration,
+    idle_timeout: Duration,
     context: &str,
     mut accept: impl FnMut(&T) -> bool,
 ) -> Result<T, AppError>
@@ -161,13 +165,14 @@ where
     T: for<'de> Deserialize<'de>,
     R: AsyncBufRead + Unpin,
 {
-    let start_at = Instant::now();
     let mut line_bytes = Vec::new();
+    let mut last_activity = Instant::now();
 
     loop {
-        let remaining = timeout
-            .checked_sub(start_at.elapsed())
-            .ok_or_else(|| AppError::Asr(format!("{}超时", context)))?;
+        let remaining = idle_timeout.saturating_sub(last_activity.elapsed());
+        if remaining.is_zero() {
+            return Err(AppError::Asr(format!("{}超时", context)));
+        }
 
         line_bytes.clear();
         let read_result =
@@ -178,6 +183,9 @@ where
                 return Err(AppError::Asr(format!("{}失败：stdout 已关闭", context)));
             }
             Ok(Ok(_)) => {
+                // 任何一行 stdout 都算「有进展」，包括保活消息。
+                last_activity = Instant::now();
+
                 let line = match std::str::from_utf8(&line_bytes) {
                     Ok(line) => std::borrow::Cow::Borrowed(line),
                     Err(err) => {
@@ -195,35 +203,33 @@ where
                     continue;
                 }
 
-                if let Ok(value) = serde_json::from_str::<T>(trimmed) {
-                    if accept(&value) {
-                        return Ok(value);
-                    }
-                    log::warn!("{}阶段丢弃了不匹配的旧 JSON 响应", context);
+                // 先在 JSON 值层面识别保活消息：它带 request_id，若直接反序列化成
+                // ServerResponse 会被误当成当前请求的最终响应。
+                let value = parse_json_line(trimmed);
+                let Some(value) = value else {
+                    log::warn!(
+                        "{}阶段收到非JSON输出 ({}字符)",
+                        context,
+                        trimmed.chars().count()
+                    );
+                    continue;
+                };
+                if value.get("type").and_then(serde_json::Value::as_str) == Some("progress") {
+                    log::debug!("{}阶段收到引擎进度消息，重置无进展计时", context);
                     continue;
                 }
 
-                // 某些 Windows 机器上，第三方库会把噪音输出和 JSON 响应挤在同一行。
-                // 尝试从首个 '{' 到末尾 '}' 提取有效 JSON，避免一次脏输出导致整次初始化失败。
-                if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
-                    if start < end {
-                        if let Ok(value) = serde_json::from_str::<T>(&trimmed[start..=end]) {
-                            if !accept(&value) {
-                                log::warn!("{}阶段丢弃了不匹配的旧 JSON 响应", context);
-                                continue;
-                            }
-                            log::warn!("{}阶段从混合输出中恢复了 JSON 响应", context);
-                            return Ok(value);
+                match serde_json::from_value::<T>(value) {
+                    Ok(response) => {
+                        if accept(&response) {
+                            return Ok(response);
                         }
+                        log::warn!("{}阶段丢弃了不匹配的旧 JSON 响应", context);
+                    }
+                    Err(err) => {
+                        log::warn!("{}阶段收到无法解析的 JSON 响应: {}", context, err);
                     }
                 }
-
-                log::warn!(
-                    "{}阶段收到非JSON输出 ({}字符)",
-                    context,
-                    trimmed.chars().count()
-                );
-                continue;
             }
             Ok(Err(e)) => {
                 return Err(AppError::Asr(format!("{}失败：{}", context, e)));
@@ -233,4 +239,19 @@ where
             }
         }
     }
+}
+
+/// 解析一行 JSON；兼容第三方库把噪音与 JSON 挤在同一行的情况（取首个 `{` 到
+/// 末尾 `}`）。返回 None 表示这行不是可用的 JSON。
+fn parse_json_line(trimmed: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(value);
+    }
+    let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) else {
+        return None;
+    };
+    if start >= end {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&trimmed[start..=end]).ok()
 }

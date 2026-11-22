@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import { ArrowLeft, FileAudio, LoaderCircle, Minus, NotebookPen, Upload, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -28,17 +27,6 @@ function formatDuration(seconds: number | null): string {
 function formatSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-}
-
-/** 预估耗时文案。在线引擎没有预估，显示说明而不是空着。 */
-function estimateLabel(t: TFunction, seconds: number | null): string {
-  if (seconds == null) return t("upload.estimateUnknown");
-  const total = Math.max(1, Math.round(seconds));
-  if (total < 60) return t("upload.estimateSeconds", { seconds: total });
-  return t("upload.estimateMinutes", {
-    minutes: Math.floor(total / 60),
-    seconds: total % 60,
-  });
 }
 
 export default function UploadPage({
@@ -141,9 +129,11 @@ export default function UploadPage({
                 <span aria-hidden="true">·</span>
                 <span>{picked.probe.engine}</span>
               </div>
-              <p className={`upload-picked-estimate${picked.probe.limitHint ? " is-warning" : ""}`}>
-                {picked.probe.limitHint ?? estimateLabel(t, picked.probe.estimatedSecs)}
-              </p>
+              {picked.probe.limitHint && (
+                <p className="upload-picked-hint is-warning">
+                  {picked.probe.limitHint}
+                </p>
+              )}
               <div className="upload-picked-actions">
                 <button
                   type="button"

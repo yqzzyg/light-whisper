@@ -103,6 +103,63 @@ class StdoutSuppressor:
                     self._stdout_original = None
 
 
+# Serialize every JSONL line written to the protocol pipe. Native inference may
+# swap sys.stdout, so both replies and progress lines use the captured original
+# stream and share this lock to avoid interleaved lines between threads.
+_PROTOCOL_OUTPUT_LOCK = threading.Lock()
+
+
+class ProgressHeartbeat:
+    """Emit `{"type":"progress", ...}` lines while a command is running.
+
+    The Rust reader uses a no-progress timeout: every line resets its window.
+    """
+
+    HEARTBEAT_INTERVAL_SECS = 15.0
+
+    def __init__(self, request_id, output, logger=None):
+        self._request_id = request_id
+        self._output = output
+        self._logger = logger
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._started_at = None
+
+    def start(self):
+        if self._thread is not None:
+            return
+        # 心跳使用独立时钟，不与 GPU 空闲计时共用一个时间源。
+        self._started_at = time.perf_counter()
+        self._thread = threading.Thread(
+            target=self._loop, name="asr-progress-heartbeat", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._thread = None
+
+    def emit(self, stage="busy", **extra):
+        started = self._started_at or time.perf_counter()
+        payload = {
+            "type": "progress",
+            "stage": stage,
+            "elapsed_ms": int((time.perf_counter() - started) * 1000),
+        }
+        if self._request_id is not None:
+            payload["request_id"] = self._request_id
+        payload.update(extra)
+        with _PROTOCOL_OUTPUT_LOCK:
+            print(json.dumps(payload, ensure_ascii=False), file=self._output, flush=True)
+
+    def _loop(self):
+        while not self._stop_event.wait(self.HEARTBEAT_INTERVAL_SECS):
+            self.emit("busy")
+
+
 def decode_inline_audio(
     audio_base64: str,
     audio_format: Optional[str],
@@ -187,6 +244,8 @@ class BaseASRServer:
         self._gpu_suspended = False
         self._audio_processing_enabled = os.environ.get("LIGHT_WHISPER_AUDIO_PROCESSING") == "1"
         self._audio_processor = None
+        # 当前命令的进度回报器，由 run() 在每条命令前后挂上/摘下。
+        self._progress = None
 
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -195,6 +254,12 @@ class BaseASRServer:
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    def report_progress(self, stage, **extra):
+        """Report a real stage transition; periodic heartbeats cover long waits."""
+        heartbeat = self._progress
+        if heartbeat is not None:
+            heartbeat.emit(stage, **extra)
 
     def _detect_device(self) -> str:
         return "cuda" if _has_nvidia_gpu() else "cpu"
@@ -500,7 +565,8 @@ class BaseASRServer:
         protocol_output = sys.stdout
 
         def send(result):
-            print(json.dumps(result, ensure_ascii=False), file=protocol_output, flush=True)
+            with _PROTOCOL_OUTPUT_LOCK:
+                print(json.dumps(result, ensure_ascii=False), file=protocol_output, flush=True)
 
         self.logger.info(f"{self.engine} 服务器启动")
 
@@ -516,6 +582,7 @@ class BaseASRServer:
 
         while self.running:
             request_id = None
+            heartbeat = None
             try:
                 line = sys.stdin.readline()
                 if not line:
@@ -540,24 +607,34 @@ class BaseASRServer:
                     if isinstance(rid, int):
                         request_id = rid
 
-                action = command.get("action")
-                if action == "exit":
-                    if self._gpu_idle_thread is not None:
-                        self._stop_gpu_idle_thread()
-                    result = {"success": True, "message": "服务器退出"}
-                    if request_id is not None and isinstance(result, dict):
-                        result["request_id"] = request_id
-                    send(result)
-                    break
-                elif action == "set_gpu_idle":
-                    result = self._handle_set_gpu_idle(command)
-                elif self._gpu_idle_seconds > 0 and action in GPU_IDLE_LOCKED_ACTIONS:
-                    with self._gpu_idle_lock:
+                # 推理期间由心跳持续回报「仍有进展」，Rust 的无进展计时随每次
+                # 心跳重置；阶段性的真实进度由引擎调用 report_progress() 补发。
+                heartbeat = ProgressHeartbeat(request_id, protocol_output, self.logger)
+                self._progress = heartbeat
+                heartbeat.start()
+                try:
+                    action = command.get("action")
+                    if action == "exit":
+                        if self._gpu_idle_thread is not None:
+                            self._stop_gpu_idle_thread()
+                        result = {"success": True, "message": "服务器退出"}
+                        if request_id is not None and isinstance(result, dict):
+                            result["request_id"] = request_id
+                        send(result)
+                        break
+                    elif action == "set_gpu_idle":
+                        result = self._handle_set_gpu_idle(command)
+                    elif self._gpu_idle_seconds > 0 and action in GPU_IDLE_LOCKED_ACTIONS:
+                        with self._gpu_idle_lock:
+                            result = self._execute_action(command, action)
+                            if action in GPU_IDLE_ACTIVITY_ACTIONS:
+                                self._last_activity_at = time.monotonic()
+                    else:
                         result = self._execute_action(command, action)
-                        if action in GPU_IDLE_ACTIVITY_ACTIONS:
-                            self._last_activity_at = time.monotonic()
-                else:
-                    result = self._execute_action(command, action)
+                finally:
+                    heartbeat.stop()
+                    self._progress = None
+                    heartbeat = None
 
                 if request_id is not None and isinstance(result, dict):
                     result["request_id"] = request_id

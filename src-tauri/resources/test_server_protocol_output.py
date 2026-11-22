@@ -1,11 +1,14 @@
+import io
 import json
 import os
 import queue
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
+from server_common import ProgressHeartbeat, StdoutSuppressor
 from test_server_stream_dispatch import RecordingStreamServer
 
 
@@ -127,6 +130,40 @@ class ServerProtocolOutputTests(unittest.TestCase):
         self.assertFalse(runner.is_alive())
         self.assertFalse(reader.is_alive())
         self.assertEqual(run_errors, [])
+
+
+class ProgressHeartbeatTests(unittest.TestCase):
+    def test_emit_writes_a_progress_line_with_request_id(self):
+        output = io.StringIO()
+        heartbeat = ProgressHeartbeat(42, output)
+
+        heartbeat.emit("asr_start", duration=12.5)
+
+        payload = json.loads(output.getvalue().strip())
+        self.assertEqual(payload["type"], "progress")
+        self.assertEqual(payload["request_id"], 42)
+        self.assertEqual(payload["stage"], "asr_start")
+        self.assertEqual(payload["duration"], 12.5)
+        self.assertIn("elapsed_ms", payload)
+
+    def test_heartbeat_keeps_reporting_while_native_stdout_is_suppressed(self):
+        output = io.StringIO()
+        with mock.patch.object(ProgressHeartbeat, "HEARTBEAT_INTERVAL_SECS", 0.01):
+            heartbeat = ProgressHeartbeat(9, output)
+            heartbeat.start()
+            try:
+                # Native inference redirects sys.stdout; the protocol pipe is a
+                # captured original stream and must stay usable for heartbeats.
+                with StdoutSuppressor().suppress():
+                    time.sleep(0.08)
+            finally:
+                heartbeat.stop()
+
+        lines = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertTrue(
+            all(line["type"] == "progress" and line["request_id"] == 9 for line in lines)
+        )
 
 
 if __name__ == "__main__":

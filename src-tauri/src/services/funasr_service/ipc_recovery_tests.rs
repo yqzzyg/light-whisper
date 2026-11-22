@@ -486,14 +486,20 @@ mod async_ownership_replay_tests {
         state.set_funasr_ready(true);
         state.set_inline_audio_transport(Some(true));
         let command = pipe_filling_command();
-        // IpcCommandDeadline expires at tick 3. Serialization and real pipe I/O
-        // must not spend model ticks; only ipc:tick advances this clock.
+        // ipc-deadline 追踪里写在 tick 1 完成，读取窗口从 tick 1 起算，
+        // 因此这里用 2 秒窗口让它在 tick 3 到期，与 TLC trace 的预期一致。
+        // 只有 ipc:tick 推进这个时钟。
+        let idle_timeout = if name == "ipc-deadline" {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(3)
+        };
         tokio::time::pause();
         let mut operation = Some(Box::pin(super::super::send_command_to_server_with_timeout(
             &state,
             &command,
             Some(app.handle()),
-            Duration::from_secs(3),
+            idle_timeout,
         )));
         let started = tokio::time::Instant::now();
         let mut ticks = 0;
@@ -553,7 +559,7 @@ mod async_ownership_replay_tests {
                             }
                             assert!(
                                 watchdog.elapsed() < Duration::from_secs(10),
-                                "the original total command deadline must expire at tick 3 in {name}"
+                                "the current stage's no-progress window must expire at tick 3 in {name}"
                             );
                             std::thread::sleep(Duration::from_millis(1));
                             tokio::task::yield_now().await;

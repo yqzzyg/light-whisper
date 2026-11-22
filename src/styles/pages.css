@@ -3036,14 +3036,14 @@ select:disabled { cursor: not-allowed; opacity: 0.6; }
   font-variant-numeric: tabular-nums;
 }
 
-.upload-picked-estimate {
+.upload-picked-hint {
   margin: 0 0 4px;
   font-size: 12px;
   line-height: 1.6;
   color: var(--color-text-tertiary);
 }
 
-.upload-picked-estimate.is-warning {
+.upload-picked-hint.is-warning {
   color: var(--color-warning);
 }
 
@@ -3904,10 +3904,6 @@ select:disabled { cursor: not-allowed; opacity: 0.6; }
   padding: 0 24px;
   font-size: var(--text-2xs);
   color: var(--color-text-secondary);
-}
-
-.notes-transcribe-estimate {
-  color: var(--color-text-tertiary);
 }
 
 .notes-transcribe-hint {

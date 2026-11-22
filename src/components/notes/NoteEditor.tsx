@@ -22,10 +22,7 @@ import { copyToClipboard, getNoteRecordingAudioUrl, saveTextFile } from "@/api/t
 import MarkdownContent from "@/components/MarkdownContent";
 import MarkdownEditor from "@/components/notes/MarkdownEditor";
 import { formatDuration } from "@/lib/duration";
-import {
-  estimateTranscribeSeconds,
-  type NoteTranscriptionState,
-} from "@/hooks/noteTranscriptionStore";
+import type { NoteTranscriptionState } from "@/hooks/noteTranscriptionStore";
 import {
   cancelSummary,
   ensureNoteSummarySubscribed,
@@ -195,8 +192,8 @@ export default function NoteEditor({
 
   const transcript = note.transcript ?? "";
   const summary = note.summary ?? "";
-  // 导出的是一条笔记的全量（标题 + 正文 + 转录 + 摘要），所以只要有任意一块
-  // 有字就允许导出；以前只在「摘要」tab 提供入口，没写摘要的笔记就导不出来。
+  // 导出的是一条笔记的全量（标题 + 正文 + 转录 + 摘要），任意一块有字即可；
+  // 摘要不是导出的前置条件。
   const hasExportableContent = Boolean(
     note.title.trim() || note.content.trim() || transcript.trim() || summary.trim(),
   );
@@ -212,9 +209,6 @@ export default function NoteEditor({
   const pendingDuration = pendingRecordings.reduce(
     (sum, item) => sum + (item.durationSec ?? 0),
     0,
-  );
-  const estimate = estimateTranscribeSeconds(
-    pendingDuration > 0 ? pendingDuration : note.durationSec,
   );
   // 是否还有段没转写：只有段表是录音的事实源（`notes.audio_file` 迁移后恒为空，
   // 不再参与判断）。从历史转存来的笔记没有段，也不会误判成待转写。
@@ -434,11 +428,6 @@ export default function NoteEditor({
                           elapsed: formatDuration(transcription.elapsedSec),
                         })}
                   </span>
-                  {estimate !== null && (
-                    <span className="notes-transcribe-estimate">
-                      {t("notes.transcribeEstimate", { estimate: formatDuration(estimate) })}
-                    </span>
-                  )}
                   <span className="notes-transcribe-hint">{t("notes.transcribeCanLeave")}</span>
                 </p>
               ) : (
@@ -453,11 +442,9 @@ export default function NoteEditor({
                     <AudioLines size={12} />
                     {t("notes.transcribe")}
                   </button>
-                  {estimate !== null && (
-                    <span className="notes-transcribe-hint">
-                      {t("notes.transcribeHint", { estimate: formatDuration(estimate) })}
-                    </span>
-                  )}
+                  <span className="notes-transcribe-hint">
+                    {t("notes.transcribeCanLeave")}
+                  </span>
                 </div>
               )}
               {transcribeError && (

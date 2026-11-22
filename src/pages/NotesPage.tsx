@@ -107,7 +107,7 @@ export default function NotesPage({
   };
 
   /**
-   * 转写所有未转写的段。命令可能跑几分钟，但用户看到的是「已用时 + 预估」，
+   * 转写所有未转写的段。命令可能跑几分钟，但用户看得到已用时，
    * 走开了也会照常完成（状态在模块级 store 里，不随组件卸载丢失）。
    */
   const handleTranscribe = async () => {

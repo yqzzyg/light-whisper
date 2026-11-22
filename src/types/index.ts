@@ -336,8 +336,6 @@ export interface AudioProbe {
   engine: string;
   /** 当前引擎转不了时的拦截文案；null 表示可以转。 */
   limitHint: string | null;
-  /** 预估转写耗时（秒）；在线引擎依赖网络，为 null。 */
-  estimatedSecs: number | null;
 }
 
 export interface PersistentHistoryFilter {

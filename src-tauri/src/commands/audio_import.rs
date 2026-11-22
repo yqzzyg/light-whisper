@@ -42,10 +42,6 @@ pub async fn pick_audio_file(window: tauri::WebviewWindow) -> Result<Option<Stri
     Ok(result.map(|file| paths::strip_win_prefix(file.path())))
 }
 
-/// 本地引擎实测约 4.6 倍实时（317 秒音频 68.6 秒转完）。取 4 倍并向上取整，
-/// 让预估偏保守——报少了用户会以为卡死。
-const LOCAL_ESTIMATE_SECS_PER_AUDIO_SEC: f64 = 0.25;
-
 /// 「选完文件先回显、用户确认再转写」用的音频信息。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,8 +55,6 @@ pub struct AudioProbe {
     pub engine: String,
     /// 当前引擎转不了这段音频时的拦截文案；`None` 表示可以转。
     pub limit_hint: Option<String>,
-    /// 预估转写耗时（秒）。在线引擎依赖网络，不给预估。
-    pub estimated_secs: Option<f64>,
 }
 
 /// 探测音频文件信息，不转写、不写历史、不占 ASR 锁。
@@ -85,20 +79,12 @@ pub async fn probe_audio_file(path: String) -> Result<AudioProbe, AppError> {
     .err()
     .map(|error| error.message());
 
-    let estimated_secs = if transcription_service::is_local_engine(&engine) {
-        meta.duration_sec
-            .map(|secs| (secs * LOCAL_ESTIMATE_SECS_PER_AUDIO_SEC).ceil())
-    } else {
-        None
-    };
-
     Ok(AudioProbe {
         duration_sec: meta.duration_sec,
         size_bytes: meta.size_bytes,
         sample_rate: meta.sample_rate,
         engine,
         limit_hint,
-        estimated_secs,
     })
 }
 

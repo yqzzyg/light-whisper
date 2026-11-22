@@ -50,12 +50,6 @@ vi.mock("@/components/MarkdownContent", () => ({
   default: ({ content }: { content: string }) => <div data-testid="markdown">{content}</div>,
 }));
 
-// 预估只是 19× 实时的除法，这里固定成 30 秒，断言「有没有显示预估」就够了。
-vi.mock("@/hooks/noteTranscriptionStore", () => ({
-  estimateTranscribeSeconds: (durationSec: number | null | undefined) =>
-    durationSec ? 30 : null,
-}));
-
 import NoteEditor, {
   buildExportFileName,
   composeNoteExport,

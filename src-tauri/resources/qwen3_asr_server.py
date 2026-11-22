@@ -299,6 +299,7 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
             processor = getattr(self, "_audio_processor", None)
             if processor is not None:
                 audio = processor.enhance(audio)
+            self.report_progress("vad_start", duration=round(duration, 3))
             audio, vad_segments, vad_ms = self._filter_speech(audio)
             speech_duration = len(audio) / float(QWEN3_VAD_SAMPLE_RATE)
             if not vad_segments:
@@ -318,9 +319,13 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
                     "inference_ms": 0.0,
                 }
 
+            self.report_progress(
+                "asr_start", speech_duration=round(speech_duration, 3), vad_segments=vad_segments
+            )
             started = time.perf_counter()
             result = self._run_inference(audio, context=context, language=language)
             inference_ms = (time.perf_counter() - started) * 1000
+            self.report_progress("asr_done", inference_ms=round(inference_ms, 3))
             self._total_inference_ms += inference_ms
             self.transcription_count += 1
 

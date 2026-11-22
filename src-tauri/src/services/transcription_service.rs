@@ -14,10 +14,7 @@
 //! 调用方只负责落库：上传写 `mode=import` 并保留音频，笔记写 `mode=note` 且不持有
 //! 音频文件。归档语义不属于转写，所以不放进这一层。
 //!
-//! 这里曾经还有一条「原生流式」策略，给上传页做渐进文字。2026-11-21 按用户决定去掉：
-//! 流式要求 Rust 侧先解出整段 `Vec<i16>`，Python 的 `_chunks` 再留一份 float32、
-//! `finish` 的 `concatenate` 又复制一份，1 小时音频峰值约 660MiB，是切片（约 115MiB）
-//! 的近 6 倍。上传页因此改为只显示进度，不再逐字出现。
+//! 逐字预览由实时听写单独负责；上传页与笔记页只显示转写状态。
 
 use std::path::Path;
 
@@ -152,9 +149,7 @@ pub async fn transcribe(
 
     let _asr_guard = state.engine.native_asr_owner.lock().await;
     match plan {
-        Plan::Whole => {
-            transcribe_whole(app_handle, state, &input, duration_sec, error_prefix).await
-        }
+        Plan::Whole => transcribe_whole(app_handle, state, &input, error_prefix).await,
         Plan::Chunked(path) => {
             transcribe_chunked(
                 app_handle,
@@ -207,12 +202,11 @@ async fn transcribe_whole(
     app_handle: &tauri::AppHandle,
     state: &AppState,
     input: &AudioInput<'_>,
-    duration_sec: Option<f64>,
     error_prefix: &str,
 ) -> Result<TranscriptionResult, AppError> {
     let result = match input {
         AudioInput::File(path) => {
-            funasr_service::transcribe_path_locked(state, path, duration_sec, app_handle).await
+            funasr_service::transcribe_path_locked(state, path, app_handle).await
         }
         // 引擎只收字节：临时文件的读写由 `transcribe_wav_bytes_via_path` 负责。
         AudioInput::WavBytes(bytes) => {
