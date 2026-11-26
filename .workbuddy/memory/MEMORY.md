@@ -52,3 +52,16 @@
 - 历史行的 `mode="note"` 且 `audio_file=NULL`：音频归笔记，写进历史会让历史 GC 删掉笔记唯一的录音。
 - 并发保护是后端 `AppState.note_transcription` 原子占位，不要只靠前端按钮 `disabled`。
 - 「重新转写」与「历史 → 笔记跳转」已在 P5 落地：`transcribe_note_recording(note_id, force)`、`find_note_by_history` / `find_notes_by_history`（批量，列表渲染用）。反查要查两条路径：`notes.history_id` 与 `note_recordings.history_id`。
+
+## 说话人分离（P0 已落地，2026-11-25）
+
+- 入口是 `transcription_service::transcribe_with_speakers`，**不是**新命令：`transcribe_note_recording` 内部换函数名，降级全在服务层。命令层不要写 `match`。
+- **锁顺序是硬约束**：`native_asr_owner` 不可重入，必须「先判条件（不拿锁）→ 需要降级当场降级 → 真要分离才拿锁」。写反即 `lock→降级→transcribe→再 lock` → 永久挂起。
+- 分段只有**一条写路径** `notes_service::save_recording_transcription_with_segments`：空 `segments` 表示「这次没分段」，重转先删后插，降级时顺带清掉旧分段（否则界面的人跟正文对不上）。
+- 前端渲染**必须按 `recordingId` 分组**：每段录音时间轴都从 0 开始，拍平会重叠且出现两个「说话人 1」。跨录音合并说话人需要声纹档案，明确不在 P0。
+- 分离模型是**两个非 gated 的 HF 镜像仓库**（`csukuangfj/sherpa-onnx-pyannote-segmentation-3-0`、`csukuangfj/speaker-embedding-models`）。计划文档里「pyannote 只能走 GitHub release tar.bz2」是错的——当时只是 huggingface.co 连不上。
+- 聚类阈值不要用 openwhispr 的 0.5：同一个人跨 31 分钟余弦 0.973、两个不同人 0.683，`cluster_distance_cut=0.40` / `merge_centroid_cos=0.85` 才是校准值。
+- 性能默认值：分段滑窗位移 2.0s + 嵌入窗步长 4，实测 101 秒/小时；**批处理不可行**（CAM++ batch 8 比 batch 1 更慢）。
+- **ASR 单次成本随音频长度超线性**（本机 3050 Ti 实测）：30s=25 ms/s、60s=63.6 ms/s、110s=161 ms/s。所以 `max_segment_seconds` 从 115 降到 **45**（2026-11-26），不能按「不分块上限」定段长；选 45 不选 30 是因为 30s 只快 7 秒（ASR 73.0→66.1s）却多 17 段（106→123）。注意 bench 的 ms/s 是纯长段值，整体加权后 45s 档实测 40.1 ms/s（短段固定开销摊高）。
+- `adjacent_merge_gap_seconds=1.0` 曾是空阈值：`extract_segments` 已把 ≤0.5s 缝隙接上，真人停顿要么 <0.5s 要么 ≥1.15s，中间区间不存在。2026-11-26 改 2.0（175 段 → 91 段，中位 5.7s → 9.9s），计划文档 §9.7。
+- **新增任何耗时长命令都必须登记进 `gpu_idle.GPU_IDLE_ACTIVITY_ACTIONS`**：漏了就不持 `_gpu_idle_lock`、也不刷新活动时间，看门狗会在命令中途卸载运行时，随后 `session.run` 打到野指针上 → access violation 崩进程。`transcribe_diarized` 就是漏网之鱼（2026-11-26 修，计划文档 §6.5）。
