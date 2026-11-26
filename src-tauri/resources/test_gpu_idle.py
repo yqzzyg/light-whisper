@@ -79,6 +79,7 @@ class _IdleServer(BaseASRServer):
         self.initialize_calls = 0
         self.stream_active = False
         self.loaded = True
+        self.tick_during_diarization = None
         logger = logging.getLogger(f"test_gpu_idle.{id(self)}")
         logger.disabled = True
         logger.propagate = False
@@ -116,6 +117,11 @@ class _IdleServer(BaseASRServer):
             if not init_result.get("success"):
                 return init_result
         return {"success": True, "text": "ok"}
+
+    def transcribe_diarized(self, audio_path, options=None, hot_words=None):
+        # 分离要跑几分钟，看门狗一定会在命令执行中到点；这里直接模拟那一次 tick。
+        self.tick_during_diarization = self._gpu_idle_tick(now=10_000)
+        return {"success": True, "text": "ok", "segments": []}
 
     def _gpu_idle_stream_active(self):
         return self.stream_active
@@ -241,6 +247,24 @@ class IdleServerTests(unittest.TestCase):
         # Enable, transcribe and stream_finish sample the clock; queries do not.
         self.assertEqual(server._last_activity_at, 15.0)
         self.assertEqual(server.suspend_calls, 0)
+
+    def test_diarized_transcription_blocks_unload_and_refreshes_activity(self):
+        # 回归：分离整段在 CPU 上跑几分钟，曾漏登记为「活动命令」，结果看门狗在
+        # 分离中途卸掉 GPU 运行时，分离结束的第一次识别打到野指针上直接崩进程。
+        server = _IdleServer()
+        with mock.patch.object(server, "_ensure_gpu_idle_thread"):
+            server._handle_set_gpu_idle({"seconds": 30})
+        server._last_activity_at = 0  # 距上次活动早已超时
+
+        responses = self._run(
+            server,
+            [{"action": "transcribe_diarized", "audio_path": "a.wav", "request_id": 1}],
+        )
+
+        self.assertTrue(responses[1]["success"])
+        self.assertFalse(server.tick_during_diarization)
+        self.assertEqual(server.suspend_calls, 0)
+        self.assertGreater(server._last_activity_at or 0, 0)
 
     def test_tick_unloads_only_when_due_and_not_busy_or_streaming(self):
         server = _IdleServer()

@@ -17,6 +17,12 @@ MAX_GPU_IDLE_SECONDS = 7 * 24 * 60 * 60
 GPU_IDLE_ACTIVITY_ACTIONS = frozenset(
     {
         "transcribe",
+        # 分离整段在 CPU 上跑，长录音要几分钟。漏掉这一条会有两个后果：
+        # (1) 命令期间不持锁，看门狗可以把 GPU 运行时卸掉；
+        # (2) 命令结束后不刷新活动时间，下次 tick 立刻又判成空闲。
+        # 卸在分离中途时，分离结束的第一次 session.run 会打到已释放的原生句柄上，
+        # Windows 下是 access violation（进程直接死），不是 Python 异常。
+        "transcribe_diarized",
         "stream_start",
         "stream_feed",
         "stream_finish",

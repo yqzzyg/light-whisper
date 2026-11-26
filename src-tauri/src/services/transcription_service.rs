@@ -22,7 +22,8 @@ use crate::state::AppState;
 use crate::utils::{paths, AppError};
 
 use super::audio_chunk_service::{self, WavChunker, CHUNK_SECS};
-use super::funasr_service::{self, TranscriptionResult};
+use super::funasr_service::{self, DiarizedAttempt, TranscriptionResult};
+use super::notes_service::SpeakerSegment;
 use super::transcription_events::{self, Preview};
 use super::{alibaba_asr_service, audio_service, glm_asr_service};
 
@@ -31,7 +32,14 @@ const GLM_MAX_DURATION_SECS: f64 = 30.0;
 const GLM_MAX_BYTES: usize = 25 * 1024 * 1024;
 const DASHSCOPE_MAX_BASE64_BYTES: usize = 10 * 1024 * 1024;
 
+/// 超过这个时长的录音不做说话人分离，直接整段转写。
+///
+/// 分离耗时约 100 秒/小时（已实测），两小时是「用户还能等」的上限；再长就让
+/// 用户先拿到文字，而不是先等半小时分离。阈值与前端提示文案一致。
+pub const MAX_DIARIZATION_SECS: f64 = 2.0 * 3600.0;
+
 /// 音频来源。
+#[derive(Clone, Copy)]
 pub enum AudioInput<'a> {
     /// 内存里的 16k 单声道 16bit WAV 字节（上传解码结果、历史重识别）。
     WavBytes(&'a [u8]),
@@ -162,6 +170,195 @@ pub async fn transcribe(
             .await
         }
     }
+}
+
+/// 一次转写的结果，附带说话人分段。
+///
+/// 分段可能为空：没做分离、或分离退化了。所以 `segments` 为空不代表失败，
+/// 调用方要看 `fallback_reason` 才知道该不该提示用户。
+pub struct SpeakerTranscription {
+    pub result: TranscriptionResult,
+    /// 按时间排好序的分段，`text` 已填好。空表示「这次没有分段」。
+    pub segments: Vec<SpeakerSegment>,
+    /// 分离统计（说话人数、语音占比等），仅诊断用。
+    pub diarization: Option<serde_json::Value>,
+    /// 降级原因；`None` 表示真的做了分离。见 [`DiarizationSkip`]。
+    pub fallback_reason: Option<DiarizationSkip>,
+}
+
+/// 为什么没做说话人分离。
+///
+/// 命令层把它直接透给前端做文案，所以每一项都要能对上一句人话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiarizationSkip {
+    /// 用户在设置里关掉了。
+    Disabled,
+    /// 当前是在线引擎，拿不到本地分离管线。
+    OnlineEngine,
+    /// 手上只有字节（历史重识别），没有可直传的音频路径。
+    NoAudioFile,
+    /// 录音超过 [`MAX_DIARIZATION_SECS`]。
+    TooLong,
+    /// 分离模型没下载。
+    ModelsMissing,
+    /// 录音太短，分不出人。
+    AudioTooShort,
+    /// 采样率不是 16k。
+    UnsupportedSampleRate,
+    /// 分离过程中出错。
+    Failed,
+}
+
+impl DiarizationSkip {
+    /// 机器可读的原因码，前后端约定用同一套字符串。
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::OnlineEngine => "online_engine",
+            Self::NoAudioFile => "no_audio_file",
+            Self::TooLong => "too_long",
+            Self::ModelsMissing => "models_missing",
+            Self::AudioTooShort => "audio_too_short",
+            Self::UnsupportedSampleRate => "unsupported_sample_rate",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// 服务端错误码 → 跳过原因。认不出来的一律当 `Failed`。
+    fn from_server_code(code: &str) -> Self {
+        match code {
+            "diarization_models_missing" => Self::ModelsMissing,
+            "audio_too_short" => Self::AudioTooShort,
+            "unsupported_sample_rate" => Self::UnsupportedSampleRate,
+            "unsupported_engine" => Self::OnlineEngine,
+            _ => Self::Failed,
+        }
+    }
+}
+
+/// 带说话人分离的转写，笔记链路专用。
+///
+/// 与 [`transcribe`] 的关系是「包一层」而不是「另开一条」：分离做不了就原样调
+/// `transcribe`，所以命令层只换函数名，降级分支全在这一层。
+///
+/// **锁顺序是这里的核心约束**：`native_asr_owner` 不可重入，因此必须
+/// 「先判条件（不拿锁）→ 需要降级就当场降级 → 只有真要分离时才拿锁」。写反了就是
+/// `先 lock() → 判出要降级 → 调 transcribe() → 它再 lock() → 永久挂起`。
+pub async fn transcribe_with_speakers(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    input: AudioInput<'_>,
+    options: TranscribeOptions<'_>,
+) -> Result<SpeakerTranscription, AppError> {
+    let engine = paths::read_engine_config();
+    // `File` 的时长只有调用方知道（录音元数据里有），所以这里不自己读文件头。
+    let duration_sec = options.duration_sec.or_else(|| match &input {
+        AudioInput::WavBytes(bytes) => audio_service::wav_duration_secs(bytes),
+        AudioInput::File(_) => None,
+    });
+    let options = TranscribeOptions {
+        duration_sec,
+        ..options
+    };
+
+    // 第一步：所有「不必拿锁就能判掉」的条件，全部在这里判完。
+    let skip = precheck_diarization(state, &engine, &input, duration_sec);
+    let Some(path) = input_path_when_allowed(&input, skip) else {
+        // 走不到 `NoAudioFile` 兜底以外的分支：能进来就一定是「有原因」或
+        // 「字节输入」，两者都会让上面返回 `None`。
+        let skip = skip.unwrap_or(DiarizationSkip::NoAudioFile);
+        return fallback_transcribe(app_handle, state, input, options, skip).await;
+    };
+
+    // 第二步：真要分离，才拿锁。
+    let attempt = {
+        let _asr_guard = state.engine.native_asr_owner.lock().await;
+        funasr_service::transcribe_diarized_locked(state, path, app_handle).await
+    };
+
+    match attempt {
+        DiarizedAttempt::Ok(diarized) => Ok(SpeakerTranscription {
+            result: TranscriptionResult {
+                text: diarized.text,
+                duration: diarized.duration.or(duration_sec),
+                success: true,
+                error: None,
+                language: diarized.language,
+            },
+            segments: diarized.segments,
+            diarization: diarized.diarization,
+            fallback_reason: None,
+        }),
+        // 两种失败都降级。`Failed` 要留日志：它是真 bug，`Unavailable` 是预期内。
+        DiarizedAttempt::Unavailable { reason } => {
+            log::info!("说话人分离不可用（{reason}），本次按整段转写");
+            let skip = DiarizationSkip::from_server_code(&reason);
+            fallback_transcribe(app_handle, state, input, options, skip).await
+        }
+        DiarizedAttempt::Failed { reason } => {
+            log::warn!("说话人分离失败（{reason}），本次按整段转写");
+            fallback_transcribe(app_handle, state, input, options, DiarizationSkip::Failed).await
+        }
+    }
+}
+
+/// 不拿锁就能判掉的跳过条件。返回 `None` 表示可以分离。
+fn precheck_diarization(
+    state: &AppState,
+    engine: &str,
+    input: &AudioInput<'_>,
+    duration_sec: Option<f64>,
+) -> Option<DiarizationSkip> {
+    if !is_local_engine(engine) {
+        return Some(DiarizationSkip::OnlineEngine);
+    }
+    if !state.with_profile(|profile| profile.note_settings.diarization_enabled) {
+        return Some(DiarizationSkip::Disabled);
+    }
+    // 分离必须直传路径：一小时 WAV 读进内存再交给 Python 是两百多兆的峰值。
+    if !matches!(input, AudioInput::File(_)) {
+        return Some(DiarizationSkip::NoAudioFile);
+    }
+    if duration_sec.is_some_and(|value| value > MAX_DIARIZATION_SECS) {
+        return Some(DiarizationSkip::TooLong);
+    }
+    None
+}
+
+/// 只有「可以分离」时才给出路径；有跳过原因就返回 `None`，交给调用方降级。
+///
+/// 用一个函数把「原因」和「路径」绑在同一次判断上，避免出现
+/// 「有路径但忘了看原因」这种把降级漏掉的写法。
+fn input_path_when_allowed<'a>(
+    input: &AudioInput<'a>,
+    skip: Option<DiarizationSkip>,
+) -> Option<&'a Path> {
+    if skip.is_some() {
+        return None;
+    }
+    match input {
+        AudioInput::File(path) => Some(path),
+        AudioInput::WavBytes(_) => None,
+    }
+}
+
+/// 降级：原样走普通转写，把结果包成「零分段 + 跳过原因」。
+///
+/// 这里的 `transcribe` 自己会拿锁，所以调用前**必须**保证手上没有锁。
+async fn fallback_transcribe(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    input: AudioInput<'_>,
+    options: TranscribeOptions<'_>,
+    skip: DiarizationSkip,
+) -> Result<SpeakerTranscription, AppError> {
+    let result = transcribe(app_handle, state, input, options).await?;
+    Ok(SpeakerTranscription {
+        result,
+        segments: Vec::new(),
+        diarization: None,
+        fallback_reason: Some(skip),
+    })
 }
 
 /// 按 WAV 字节转写。给历史重识别等只有字节的调用点用。

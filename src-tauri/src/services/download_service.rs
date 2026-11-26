@@ -141,10 +141,18 @@ pub async fn run_download(
         };
 
         let models_dir = paths::strip_win_prefix(&paths::get_effective_models_dir());
+        // 说话人分离模型跟着一起下：它对用户是默认开启的功能，没有单独的「下载分离
+        // 模型」入口。用户在设置里关掉了分离就不再拉这 33MB——他要的是纯文本。
+        let with_diarization =
+            state.with_profile(|profile| profile.note_settings.diarization_enabled);
         cmd.env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
             .env("LIGHT_WHISPER_DATA_DIR", &data_dir)
             .env("HF_HUB_CACHE", &models_dir)
+            .env(
+                "LIGHT_WHISPER_WITH_DIARIZATION",
+                if with_diarization { "1" } else { "0" },
+            )
             .stdout(Stdio::piped())
             .stderr({
                 let log_path = paths::get_data_dir().join("download_stderr.log");

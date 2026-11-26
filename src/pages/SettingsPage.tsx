@@ -69,6 +69,7 @@ import SystemSettingsSections from "@/components/settings/SystemSettingsSections
 import SelectionAssistantSettingsSection from "@/components/settings/SelectionAssistantSettingsSection";
 import AppProfileRulesSettingsSection from "@/components/settings/AppProfileRulesSettingsSection";
 import HistorySettingsSection from "@/components/settings/HistorySettingsSection";
+import NoteSettingsSection from "@/components/settings/NoteSettingsSection";
 import NoteSummarySettingsSection from "@/components/settings/NoteSummarySettingsSection";
 import PolishStructureControl from "@/components/settings/PolishStructureControl";
 import ProcessingModeControl from "@/components/settings/ProcessingModeControl";
@@ -268,6 +269,7 @@ export default function SettingsPage({
     { id: "translation", labelKey: "settings.translation" },
     { id: "app-profiles", labelKey: "settings.appProfiles" },
     { id: "history-settings", labelKey: "settings.historySettings" },
+    { id: "note-settings", labelKey: "settings.noteSettings" },
     { id: "vocabulary", labelKey: "settings.vocabulary" },
     { id: "startup", labelKey: "settings.startup" },
   ] as const, []);
@@ -3922,6 +3924,11 @@ export default function SettingsPage({
           />
 
           <HistorySettingsSection
+            profile={profile}
+            onSaved={() => { void refreshProfile(); }}
+          />
+
+          <NoteSettingsSection
             profile={profile}
             onSaved={() => { void refreshProfile(); }}
           />

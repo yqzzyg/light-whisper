@@ -255,6 +255,10 @@
       "preferences",
       "profile-save"
     ],
+    "commands::profile::set_note_diarization_enabled": [
+      "preferences",
+      "profile-save"
+    ],
     "commands::profile::set_app_profile_rules": [
       "app-rules",
       "preferences",
@@ -468,6 +472,9 @@
     "commands::audio_import::transcribe_imported_audio": [
       "history"
     ],
+    "commands::audio_import::list_history_speaker_segments": [
+      "history"
+    ],
     "commands::history::reveal_history_audio": [
       "history"
     ],
@@ -568,7 +575,9 @@
     "commands::note_transcription::transcribe_note_recording_segment": [
       "notes"
     ],
-    "commands::note_summary::generate_note_summary": [
+    "commands::note_transcription::list_note_speaker_segments": [
+      "notes"
+    ],    "commands::note_summary::generate_note_summary": [
       "notes"
     ],
     "commands::note_summary::cancel_note_summary": [
@@ -1647,6 +1656,7 @@
       "implementation": [
         "src-tauri/src/services/history_service.rs",
         "src-tauri/src/commands/history.rs",
+        "src-tauri/src/commands/audio_import.rs",
         "src-tauri/src/services/audio_service/finalize.rs",
         "src/pages/HistoryPage.tsx",
         "src-tauri/src/services/audio_service/output.rs",
@@ -1657,6 +1667,11 @@
         "formal/evidence/history.md",
         "src/pages/__tests__/HistoryPage.test.tsx",
         "src-tauri/src/services/history_service.rs#latency_percentiles_match_sorted_rank_for_empty_tied_and_large_inputs",
+        "src-tauri/src/services/history_service.rs#segments_round_trip_in_insertion_order",
+        "src-tauri/src/services/history_service.rs#rewriting_segments_replaces_instead_of_appending",
+        "src-tauri/src/services/history_service.rs#deleting_history_drops_its_segments",
+        "src/components/TranscriptionResult.test.tsx",
+        "src/hooks/__tests__/useAudioImport.test.tsx",
         "src-tauri/src/services/history_service.rs#tlc_history_leases_replay_public_sqlite_operations",
         "formal/evidence/async-ownership.md",
         "src-tauri/src/services/history_stats_tests.rs",
@@ -1992,7 +2007,7 @@
       "assumptions": "Two contexts and two abstract K/vocabulary keys; four-column requests only, two calls per context for policy and three across at most two lifetimes for restart. One eligible application head per backend context; serialized synchronous application commands and idle-lock exclusion. Actual stock-kernel/device/layout guards narrow eligibility. Other column counts retain their actual scalar shape outside this model. Calibration effects/ticks are conservative abstract observations; native parity rejection skips timing. First-input parity is not all-input arithmetic proof. No compiler/driver refinement, unrestricted concurrent C ABI calls, universal GPU validation or performance proof."
     },
     "notes": {
-      "obligation": "Notes and note folders persist in their own tables of the shared SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes. Creating a note from a history record copies its transcript, duration and history id, never the audio, and stays idempotent per history record so repeated clicks yield one note. Meeting recording appends 16 kHz mono PCM to a placeholder-headed WAV at least twice a second, so a long session survives a crash with at most one flush interval lost; the header is backfilled on stop and repaired on the next startup before unreferenced files are removed. Only one recording session exists at a time, it refuses to start while dictation holds the microphone, and every recording file is deleted together with its note. A note holds several recordings: each start/stop appends a new WAV as a separate segment, and the note itself never holds an audio reference. Transcribing walks only the segments with an empty transcript, hands each stored file path to the engine without copying the audio, writes one history record per segment that carries no audio reference, and joins segment transcripts into the note transcript. Repeated clicks skip already transcribed segments, and a second concurrent transcription is refused instead of running the engine twice. A single segment can be re-transcribed on demand even when it already has a transcript, updating that segment's existing history record in place instead of appending a duplicate, and still sharing the per-note concurrency guard. Playing a segment grants asset-protocol access to that one verified file at runtime rather than opening the whole audio directory. A stored recording longer than two hours is transcribed in thirty-minute chunks streamed from the same file without copying the audio; each chunk is handed to the engine as raw PCM and the chunk texts are joined with blank lines into the one segment transcript, so the user still sees a single segment and a single history record. A cut lands in the quietest window near the target offset, and a failed chunk fails the whole segment instead of storing a partial transcript.",
+      "obligation": "Notes and note folders persist in their own tables of the shared SQLite database; deleting a folder unfiles its notes inside the same immediate write transaction, so no note ever points at a removed folder; reordering applies the given order in one transaction; listing is read-only and its total and has-more derive from the same filter set; search treats LIKE wildcards literally. Export composes the document outside the store and writes it to the path the user picks, keeping only the last segment of the suggested file name and never mutating stored notes. Creating a note from a history record copies its transcript, duration and history id, never the audio, and stays idempotent per history record so repeated clicks yield one note. Meeting recording appends 16 kHz mono PCM to a placeholder-headed WAV at least twice a second, so a long session survives a crash with at most one flush interval lost; the header is backfilled on stop and repaired on the next startup before unreferenced files are removed. Only one recording session exists at a time, it refuses to start while dictation holds the microphone, and every recording file is deleted together with its note. A note holds several recordings: each start/stop appends a new WAV as a separate segment, and the note itself never holds an audio reference. Transcribing walks only the segments with an empty transcript, hands each stored file path to the engine without copying the audio, writes one history record per segment that carries no audio reference, and joins segment transcripts into the note transcript. Repeated clicks skip already transcribed segments, and a second concurrent transcription is refused instead of running the engine twice. A single segment can be re-transcribed on demand even when it already has a transcript, updating that segment's existing history record in place instead of appending a duplicate, and still sharing the per-note concurrency guard. Playing a segment grants asset-protocol access to that one verified file at runtime rather than opening the whole audio directory. A stored recording longer than two hours is transcribed in thirty-minute chunks streamed from the same file without copying the audio; each chunk is handed to the engine as raw PCM and the chunk texts are joined with blank lines into the one segment transcript, so the user still sees a single segment and a single history record. A cut lands in the quietest window near the target offset, and a failed chunk fails the whole segment instead of storing a partial transcript. When speaker diarization is enabled, a note segment is transcribed through the diarization path, which stores one row per speaker turn next to the transcript inside the same transaction as the history record; re-transcribing replaces those rows instead of appending, and a re-transcription that ends up without diarization clears them, so the speakers rendered for a recording always match its stored transcript. Diarization never blocks transcription: a disabled setting, an online engine, an input that is not a file path, a recording longer than two hours, missing models, audio that is too short or not 16 kHz, and any diarization failure all fall back to the plain whole-file transcription and are surfaced as a skip reason rather than an error, so the transcript and its single history record are written either way. Speaker segments read back are scoped to their own recording, because every recording's timeline starts at zero, and deleting a recording deletes its segments with it.",
       "models": {
         "HistoryRecords": [
           "DeleteTransactionIsAtomic"
@@ -2005,7 +2020,13 @@
         "src-tauri/src/services/wav_writer.rs",
         "src-tauri/src/services/transcription_service.rs",
         "src-tauri/src/services/audio_chunk_service.rs",
-        "src-tauri/src/commands/note_transcription.rs"
+        "src-tauri/src/commands/note_transcription.rs",
+        "src-tauri/resources/speaker_diarize.py",
+        "src-tauri/resources/speaker_segmentation.py",
+        "src-tauri/resources/speaker_embedding.py",
+        "src-tauri/resources/speaker_models.py",
+        "src-tauri/resources/qwen3_asr_server.py",
+        "src-tauri/src/services/funasr_service.rs"
       ],
       "evidence": [
         "src-tauri/src/services/notes_service.rs#deleting_a_folder_unfiles_its_notes_without_touching_others",
@@ -2032,7 +2053,16 @@
         "src-tauri/src/services/audio_chunk_service.rs#silence_snapping_moves_the_cut_into_the_quiet_gap",
         "src-tauri/src/services/audio_chunk_service.rs#joined_transcripts_skip_blank_parts_and_use_blank_lines",
         "src-tauri/src/state/app_state.rs#a_second_transcription_is_rejected_while_one_runs",
-        "src-tauri/src/services/transcription_service.rs#local_engines_are_everything_but_the_two_online_ones"
+        "src-tauri/src/services/transcription_service.rs#local_engines_are_everything_but_the_two_online_ones",
+        "src-tauri/src/services/notes_service.rs#recording_segments_are_replaced_not_appended",
+        "src-tauri/src/services/notes_service.rs#segments_are_scoped_to_their_own_recording",
+        "src-tauri/resources/test_speaker_diarize.py#test_drops_tiny_short_cluster",
+        "src-tauri/resources/test_speaker_diarize.py#test_never_drops_two_largest_clusters",
+        "src-tauri/resources/test_speaker_diarize.py#test_flags_one_dominant_cluster_with_crumbs",
+        "src-tauri/resources/test_speaker_diarize.py#test_centroids_stay_aligned_with_ids",
+        "src-tauri/resources/test_speaker_diarize.py#test_adjacent_same_speaker_merges_across_short_pause",
+        "src-tauri/resources/test_speaker_diarize.py#test_long_segment_is_split",
+        "src-tauri/resources/test_speaker_diarize.py#test_powerset_layout_matches_pyannote"
       ],
       "assumptions": "SQLite IMMEDIATE write transactions and successful commits are trusted primitives. Notes and history share one database file but keep separate tables: notes_table never touches transcription_history rows or the history audio GC/lease tables, so the bound history model only contributes the delete-transaction atomicity obligation here. Cross-module writes (history row + recording transcript, history read + note insert) are single transactions in Rust, which is why this model keeps the note and history sides independent. The model bounds one folder and two notes; it is not a refinement of the Rust source."
     }
@@ -3439,6 +3469,7 @@
     "commands::profile::get_user_profile": "src-tauri/src/commands/profile.rs#fn get_user_profile(",
     "commands::profile::set_autostart_minimized": "src-tauri/src/commands/profile.rs#fn set_autostart_minimized(",
     "commands::profile::set_history_settings": "src-tauri/src/commands/profile.rs#fn set_history_settings(",
+    "commands::profile::set_note_diarization_enabled": "src-tauri/src/commands/profile.rs#fn set_note_diarization_enabled(",
     "commands::profile::set_app_profile_rules": "src-tauri/src/commands/profile.rs#fn set_app_profile_rules(",
     "commands::profile::add_hot_word": "src-tauri/src/commands/profile.rs#fn add_hot_word(",
     "commands::profile::remove_hot_word": "src-tauri/src/commands/profile.rs#fn remove_hot_word(",
@@ -3493,6 +3524,7 @@
     "commands::audio_import::pick_audio_file": "src-tauri/src/commands/audio_import.rs#fn pick_audio_file(",
     "commands::audio_import::probe_audio_file": "src-tauri/src/commands/audio_import.rs#fn probe_audio_file(",
     "commands::audio_import::transcribe_imported_audio": "src-tauri/src/commands/audio_import.rs#fn transcribe_imported_audio(",
+    "commands::audio_import::list_history_speaker_segments": "src-tauri/src/commands/audio_import.rs#fn list_history_speaker_segments(",
     "commands::history::reveal_history_audio": "src-tauri/src/commands/history.rs#fn reveal_history_audio(",
     "commands::funasr::get_gpu_idle_seconds": "src-tauri/src/commands/funasr.rs#fn get_gpu_idle_seconds(",
     "commands::funasr::set_gpu_idle_seconds": "src-tauri/src/commands/funasr.rs#fn set_gpu_idle_seconds(",
@@ -3526,6 +3558,7 @@
     "commands::note_recording::get_note_recording_state": "src-tauri/src/commands/note_recording.rs#pub fn get_note_recording_state(",
     "commands::note_transcription::transcribe_note_recording": "src-tauri/src/commands/note_transcription.rs#pub async fn transcribe_note_recording(",
     "commands::note_transcription::transcribe_note_recording_segment": "src-tauri/src/commands/note_transcription.rs#pub async fn transcribe_note_recording_segment(",
+    "commands::note_transcription::list_note_speaker_segments": "src-tauri/src/commands/note_transcription.rs#pub async fn list_note_speaker_segments(",
     "commands::note_summary::generate_note_summary": "src-tauri/src/commands/note_summary.rs#pub async fn generate_note_summary(",
     "commands::note_summary::cancel_note_summary": "src-tauri/src/commands/note_summary.rs#pub fn cancel_note_summary(",
     "commands::note_summary::get_note_summary_prompt_defaults": "src-tauri/src/commands/note_summary.rs#pub fn get_note_summary_prompt_defaults(",

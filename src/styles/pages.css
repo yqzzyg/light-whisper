@@ -265,6 +265,81 @@
   color: var(--color-text-secondary);
 }
 
+/* 「说话人 / 正文」两态切换。两个按钮常驻，避免切换时头部高度跳动。 */
+.result-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 1px;
+  margin-right: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-tertiary, rgba(128, 128, 128, 0.08));
+}
+
+.result-view-btn {
+  padding: 1px 8px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-2xs);
+  line-height: 1.6;
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease-out-expo),
+              background-color var(--dur-2) var(--ease-out-expo);
+}
+
+.result-view-btn:hover {
+  color: var(--color-text-secondary);
+}
+
+.result-view-btn[aria-pressed="true"] {
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+.result-view-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/*
+ * 说话人视图固定在卡片内滚动。
+ * 分段动辄上百条，交给页面滚会顶掉下面的「存为笔记」按钮。
+ */
+.result-speaker-body {
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+/* 复用笔记的说话人样式，只把内边距收紧到结果卡的尺度。 */
+.result-speaker-body .notes-speakers-head {
+  padding: 6px 14px;
+}
+
+.result-speaker-body .notes-panel-scroll {
+  padding: 4px 0 8px;
+  overflow: visible;
+}
+
+.result-speaker-body .notes-speaker-turn {
+  padding: 5px 14px;
+}
+
+.result-speaker-body .notes-speaker-meta {
+  flex: 0 0 74px;
+}
+
+.result-speaker-fallback {
+  margin: 0;
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--color-border-subtle);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-2xs);
+  text-align: right;
+}
+
 /* Error banner container */
 .error-banner {
   border-radius: var(--radius-md);
@@ -4018,6 +4093,101 @@ select:disabled { cursor: not-allowed; opacity: 0.6; }
 }
 
 .notes-transcript-text {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* 说话人视图：顶部一行统计，下面是按录音分组的对话列表。 */
+.notes-speakers {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.notes-speakers-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 24px;
+  font-size: var(--text-2xs);
+  color: var(--color-text-tertiary);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.notes-speakers-hint {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  opacity: 0.8;
+}
+
+.notes-speaker-group + .notes-speaker-group {
+  margin-top: 10px;
+}
+
+.notes-speaker-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 24px;
+  font-size: var(--text-2xs);
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-primary);
+}
+
+.notes-speaker-turns {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notes-speaker-turn {
+  display: flex;
+  gap: 10px;
+  padding: 6px 24px;
+}
+
+/* 说话人一多就轮转配色，颜色只是辅助，姓名标签才是判据。 */
+.notes-speaker-turn[data-speaker="0"] { --speaker-color: var(--speaker-1); }
+.notes-speaker-turn[data-speaker="1"] { --speaker-color: var(--speaker-2); }
+.notes-speaker-turn[data-speaker="2"] { --speaker-color: var(--speaker-3); }
+.notes-speaker-turn[data-speaker="3"] { --speaker-color: var(--speaker-4); }
+.notes-speaker-turn[data-speaker="4"] { --speaker-color: var(--speaker-5); }
+.notes-speaker-turn[data-speaker="5"] { --speaker-color: var(--speaker-6); }
+
+.notes-speaker-meta {
+  flex: 0 0 84px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 1px;
+}
+
+.notes-speaker-name {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  color: var(--speaker-color, var(--color-text-secondary));
+}
+
+.notes-speaker-time {
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+}
+
+.notes-speaker-overlap {
+  font-size: var(--text-2xs);
+  color: var(--color-warning);
+  cursor: help;
+}
+
+.notes-speaker-text {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   color: var(--color-text-secondary);
   font-size: var(--text-sm);

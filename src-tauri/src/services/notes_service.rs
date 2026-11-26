@@ -92,6 +92,31 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_note_recordings_note
                     ON note_recordings(note_id, sort_order, id);
+                -- 说话人分离的分段结果。一行录音对应多行分段，录音删了级联删。
+                -- `speaker_id` 是「本次录音内」的聚类编号，跨录音没有可比性。
+                CREATE TABLE IF NOT EXISTS note_recording_segments (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recording_id INTEGER NOT NULL REFERENCES note_recordings(id) ON DELETE CASCADE,
+                    speaker_id   INTEGER NOT NULL DEFAULT 0,
+                    start_ms     INTEGER NOT NULL,
+                    end_ms       INTEGER NOT NULL,
+                    text         TEXT    NOT NULL DEFAULT '',
+                    overlap      INTEGER NOT NULL DEFAULT 0,
+                    sort_order   INTEGER NOT NULL DEFAULT 0,
+                    created_at   INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_note_recording_segments
+                    ON note_recording_segments(recording_id, sort_order);
+                -- 说话人显示名。P2 才用；P0/P1 由前端按 speaker_id 生成「说话人 N」。
+                CREATE TABLE IF NOT EXISTS note_recording_speakers (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recording_id INTEGER NOT NULL REFERENCES note_recordings(id) ON DELETE CASCADE,
+                    speaker_id   INTEGER NOT NULL,
+                    label        TEXT    NOT NULL DEFAULT '',
+                    created_at   INTEGER NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_note_recording_speakers
+                    ON note_recording_speakers(recording_id, speaker_id);
                 "#,
             )
             .map_err(|error| format!("初始化笔记数据库失败: {error}"))
@@ -189,6 +214,12 @@ pub struct NotePage {
     pub total: u64,
     pub has_more: bool,
 }
+
+/// 说话人分段沿用历史模块的定义。
+///
+/// 分段本来就不是笔记专有的：导入音频的历史同样会有。字段保持 snake_case
+/// （与 Python 侧协议一致），这里只做重导出，让既有调用点不必改路径。
+pub use crate::services::history_service::SpeakerSegment;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1302,25 +1333,30 @@ pub async fn delete_note_recording(id: i64) -> Result<Option<(i64, String)>, Str
     .map_err(|error| format!("删除笔记录音任务失败: {error}"))?
 }
 
-/// 笔记转写的落库：写历史行 + 写回该段转录，同一个事务。
+/// 带说话人分段的转写落库：历史行、transcript、分段三者同一个事务。
 ///
 /// 同事务的理由：转写期间笔记被删的话，历史行不能留下来当孤儿。
 /// `reuse_history` 有值时**就地更新**那条历史（重新转写不堆重复记录），没有才新插。
 /// 保留期清理放在提交之后：它自己要开写事务，塞进本事务会嵌套。
-pub async fn save_recording_transcription(
+///
+/// `segments` 为空是正常输入（没做分离、或者这次降级了），此时会把该段旧分段
+/// 一起清掉——重转后模型换了人，留着旧分段比没有更糟。
+pub async fn save_recording_transcription_with_segments(
     recording_id: i64,
     draft: history_service::HistoryDraft,
     reuse_history: Option<i64>,
     retention_days: u32,
+    segments: Vec<SpeakerSegment>,
 ) -> Result<i64, String> {
     initialize().await?;
     tokio::task::spawn_blocking(move || {
         let mut connection = db::open()?;
-        let history_id = save_recording_transcription_with_connection(
+        let history_id = save_recording_transcription_and_segments_with_connection(
             &mut connection,
             recording_id,
-            draft,
+            &draft,
             reuse_history,
+            &segments,
         )?;
         if let Err(error) =
             history_service::cleanup_expired_with_connection(&mut connection, retention_days)
@@ -1333,19 +1369,54 @@ pub async fn save_recording_transcription(
     .map_err(|error| format!("保存笔记转录任务失败: {error}"))?
 }
 
-fn save_recording_transcription_with_connection(
-    connection: &mut Connection,
+/// 读一篇录音的分段，按 `sort_order` 排列。没有分段（未分离）时返回空表。
+pub async fn list_recording_segments(recording_id: i64) -> Result<Vec<SpeakerSegment>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = db::open()?;
+        list_recording_segments_with_connection(&connection, recording_id)
+    })
+    .await
+    .map_err(|error| format!("读取录音分段任务失败: {error}"))?
+}
+
+fn list_recording_segments_with_connection(
+    connection: &Connection,
     recording_id: i64,
-    draft: history_service::HistoryDraft,
+) -> Result<Vec<SpeakerSegment>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT speaker_id, start_ms, end_ms, text, overlap
+             FROM note_recording_segments
+             WHERE recording_id = ?1
+             ORDER BY sort_order ASC, id ASC",
+        )
+        .map_err(|error| format!("准备读取录音分段失败: {error}"))?;
+    let rows = statement
+        .query_map([recording_id], |row| {
+            Ok(SpeakerSegment {
+                speaker_id: row.get(0)?,
+                start_ms: row.get(1)?,
+                end_ms: row.get(2)?,
+                text: row.get(3)?,
+                overlap: row.get::<_, i64>(4)? != 0,
+            })
+        })
+        .map_err(|error| format!("读取录音分段失败: {error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("解析录音分段失败: {error}"))
+}
+
+fn write_history_and_transcript(
+    transaction: &Transaction<'_>,
+    recording_id: i64,
+    draft: &history_service::HistoryDraft,
     reuse_history: Option<i64>,
 ) -> Result<i64, String> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("开始转写落库事务失败: {error}"))?;
     let history_id = match reuse_history {
         Some(existing) => {
             let updated = history_service::update_transcription_result_with_connection(
-                &transaction,
+                transaction,
                 existing,
                 &history_service::TranscriptionUpdate {
                     text: &draft.text,
@@ -1361,14 +1432,14 @@ fn save_recording_transcription_with_connection(
             if updated {
                 existing
             } else {
-                history_service::insert_with_connection(&transaction, &draft)?
+                history_service::insert_with_connection(transaction, draft)?
             }
         }
-        None => history_service::insert_with_connection(&transaction, &draft)?,
+        None => history_service::insert_with_connection(transaction, draft)?,
     };
     // 段被删掉了就整段回滚：历史行不能留下来当孤儿。
     let written = set_recording_transcript_with_connection(
-        &transaction,
+        transaction,
         recording_id,
         &draft.text,
         Some(history_id),
@@ -1377,6 +1448,62 @@ fn save_recording_transcription_with_connection(
     if !written {
         return Err("这篇笔记已被删除".to_string());
     }
+    Ok(history_id)
+}
+
+fn replace_recording_segments_with_connection(
+    transaction: &Transaction<'_>,
+    recording_id: i64,
+    segments: &[SpeakerSegment],
+) -> Result<(), String> {
+    // 重新转写走同一个落库入口，先清旧段才不会越转越多。
+    transaction
+        .execute(
+            "DELETE FROM note_recording_segments WHERE recording_id = ?1",
+            [recording_id],
+        )
+        .map_err(|error| format!("清理旧的分段记录失败: {error}"))?;
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let created_at = now_millis();
+    let mut statement = transaction
+        .prepare(
+            "INSERT INTO note_recording_segments
+                (recording_id, speaker_id, start_ms, end_ms, text, overlap, sort_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .map_err(|error| format!("准备写入分段记录失败: {error}"))?;
+    for (index, segment) in segments.iter().enumerate() {
+        statement
+            .execute(params![
+                recording_id,
+                segment.speaker_id,
+                segment.start_ms,
+                segment.end_ms,
+                segment.text,
+                if segment.overlap { 1i64 } else { 0i64 },
+                index as i64,
+                created_at,
+            ])
+            .map_err(|error| format!("写入分段记录失败: {error}"))?;
+    }
+    Ok(())
+}
+
+fn save_recording_transcription_and_segments_with_connection(
+    connection: &mut Connection,
+    recording_id: i64,
+    draft: &history_service::HistoryDraft,
+    reuse_history: Option<i64>,
+    segments: &[SpeakerSegment],
+) -> Result<i64, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("开始转写落库事务失败: {error}"))?;
+    let history_id =
+        write_history_and_transcript(&transaction, recording_id, draft, reuse_history)?;
+    replace_recording_segments_with_connection(&transaction, recording_id, segments)?;
     transaction
         .commit()
         .map_err(|error| format!("提交转写落库事务失败: {error}"))?;
@@ -2274,6 +2401,174 @@ mod tests {
                 row.get(0)
             })
             .unwrap()
+    }
+
+    /// 无分段落库的便捷写法。
+    ///
+    /// 生产代码只有「带分段」一条落库路径（避免两条路径各写一遍历史行而慢慢分叉），
+    /// 关心历史行的测试用这个薄封装把 `segments` 填成空表即可。
+    fn save_recording_transcription_with_connection(
+        connection: &mut Connection,
+        recording_id: i64,
+        draft: history_service::HistoryDraft,
+        reuse_history: Option<i64>,
+    ) -> Result<i64, String> {
+        save_recording_transcription_and_segments_with_connection(
+            connection,
+            recording_id,
+            &draft,
+            reuse_history,
+            &[],
+        )
+    }
+
+    fn note_draft(text: &str) -> history_service::HistoryDraft {
+        history_service::HistoryDraft {
+            session_id: 1,
+            mode: "note".into(),
+            workflow: "note".into(),
+            status: "success".into(),
+            text: text.to_string(),
+            original_text: text.to_string(),
+            source_text: None,
+            duration_sec: Some(60.0),
+            language: Some("zh".into()),
+            engine: "local".into(),
+            provider: None,
+            model: None,
+            app_process: None,
+            app_window_title: None,
+            app_rule_name: None,
+            audio_file: None,
+            asr_ms: None,
+            polish_ms: None,
+            total_ms: None,
+            error: None,
+            reprocessed_from_id: None,
+        }
+    }
+
+    fn speaker_segment(speaker_id: i64, start_ms: i64, end_ms: i64, text: &str) -> SpeakerSegment {
+        SpeakerSegment {
+            speaker_id,
+            start_ms,
+            end_ms,
+            text: text.to_string(),
+            overlap: false,
+        }
+    }
+
+    /// 分段跟转录同一次落库；重转整段替换，降级成空分段时旧记录一起清掉。
+    #[test]
+    fn recording_segments_are_replaced_not_appended() {
+        let mut connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
+        let recording = add_recording_with_connection(&connection, note.id, "a.wav", Some(60.0))
+            .unwrap()
+            .unwrap();
+
+        let first = save_recording_transcription_and_segments_with_connection(
+            &mut connection,
+            recording.id,
+            &note_draft("甲说话。乙说话。"),
+            None,
+            &[
+                speaker_segment(0, 0, 1_500, "甲说话。"),
+                speaker_segment(1, 1_500, 4_000, "乙说话。"),
+            ],
+        )
+        .unwrap();
+        let stored = list_recording_segments_with_connection(&connection, recording.id).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].text, "甲说话。");
+        assert_eq!(stored[1].speaker_id, 1);
+
+        // 重转：沿用原历史行，分段整段替换而不是追加。
+        let second = save_recording_transcription_and_segments_with_connection(
+            &mut connection,
+            recording.id,
+            &note_draft("丙说话。"),
+            Some(first),
+            &[speaker_segment(2, 0, 900, "丙说话。")],
+        )
+        .unwrap();
+        assert_eq!(second, first, "重转应就地更新原来的历史行");
+        let stored = list_recording_segments_with_connection(&connection, recording.id).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].speaker_id, 2);
+
+        // 降级重转（这次没分段）：旧分段必须一起清掉，否则界面上的人跟正文对不上。
+        save_recording_transcription_and_segments_with_connection(
+            &mut connection,
+            recording.id,
+            &note_draft("这次没分离"),
+            Some(first),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            list_recording_segments_with_connection(&connection, recording.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// 分段按写入顺序读回，且不会串到同一篇笔记的另一段录音上。
+    #[test]
+    fn segments_are_scoped_to_their_own_recording() {
+        let mut connection = memory_connection();
+        let note = insert_note_with_connection(&connection, None, "会议", "meeting").unwrap();
+        let first = add_recording_with_connection(&connection, note.id, "a.wav", Some(30.0))
+            .unwrap()
+            .unwrap();
+        let second = add_recording_with_connection(&connection, note.id, "b.wav", Some(30.0))
+            .unwrap()
+            .unwrap();
+
+        save_recording_transcription_and_segments_with_connection(
+            &mut connection,
+            first.id,
+            &note_draft("甲"),
+            None,
+            &[
+                speaker_segment(0, 0, 1_000, "先"),
+                speaker_segment(1, 1_000, 2_000, "后"),
+            ],
+        )
+        .unwrap();
+        save_recording_transcription_and_segments_with_connection(
+            &mut connection,
+            second.id,
+            &note_draft("乙"),
+            None,
+            &[speaker_segment(0, 0, 500, "另一段")],
+        )
+        .unwrap();
+
+        // 读回顺序由 sort_order 决定（写入顺序），不依赖时间戳。
+        let first_segments =
+            list_recording_segments_with_connection(&connection, first.id).unwrap();
+        assert_eq!(
+            first_segments
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["先", "后"]
+        );
+        let second_segments =
+            list_recording_segments_with_connection(&connection, second.id).unwrap();
+        assert_eq!(second_segments.len(), 1);
+        assert_eq!(second_segments[0].text, "另一段");
+
+        // 删段录音要把它的分段一起带走（外键 ON DELETE CASCADE）。
+        delete_recording_with_connection(&connection, second.id)
+            .unwrap()
+            .expect("recording should exist");
+        assert!(
+            list_recording_segments_with_connection(&connection, second.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -330,6 +330,7 @@ pub fn run() {
             commands::profile::get_profile_save_status,
             commands::profile::retry_profile_save,
             commands::profile::set_history_settings,
+            commands::profile::set_note_diarization_enabled,
             commands::profile::set_app_profile_rules,
             commands::profile::add_hot_word,
             commands::profile::remove_hot_word,
@@ -379,6 +380,7 @@ pub fn run() {
             commands::audio_import::pick_audio_file,
             commands::audio_import::probe_audio_file,
             commands::audio_import::transcribe_imported_audio,
+            commands::audio_import::list_history_speaker_segments,
             commands::history::list_transcription_history,
             commands::history::get_transcription_history_stats,
             commands::history::delete_transcription_history,
@@ -415,6 +417,7 @@ pub fn run() {
             commands::note_summary::set_note_summary_part_prompt,
             commands::note_transcription::transcribe_note_recording,
             commands::note_transcription::transcribe_note_recording_segment,
+            commands::note_transcription::list_note_speaker_segments,
         ]))
         .run(tauri::generate_context!())
         .expect("启动会听时发生错误");

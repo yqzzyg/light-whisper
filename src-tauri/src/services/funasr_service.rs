@@ -659,6 +659,118 @@ pub(crate) async fn transcribe_path_locked(
     Ok(server_response_to_transcription_result(state, response))
 }
 
+/// 一次说话人分离转写的结果。
+pub(crate) struct DiarizedTranscription {
+    /// 按「说话人 N：文本」拼好的多行文本，语义上替代普通路径的 `text`。
+    pub text: String,
+    pub language: Option<String>,
+    pub duration: Option<f64>,
+    pub segments: Vec<crate::services::notes_service::SpeakerSegment>,
+    pub diarization: Option<serde_json::Value>,
+}
+
+/// 分离尝试的三种结局。
+///
+/// `Unavailable` 与 `Failed` 都要降级到普通转写，区别只在给不给用户看原因：
+/// 前者是「这条录音本来就不做分离」，后者是「本该能做但出错了」。
+pub(crate) enum DiarizedAttempt {
+    Ok(DiarizedTranscription),
+    /// 服务端明确表示做不了，带机器可读原因。
+    Unavailable {
+        reason: String,
+    },
+    /// 分离过程出错，需要记日志。
+    Failed {
+        reason: String,
+    },
+}
+
+/// 说话人分离转写。调用方必须已持有 `native_asr_owner`。
+///
+/// 服务端不可用时返回 `Unavailable` 而不是 `Err`：分离是旁路，
+/// 「做不了」不该让整次转写失败。
+pub(crate) async fn transcribe_diarized_locked(
+    state: &AppState,
+    audio_path: &std::path::Path,
+    app_handle: &tauri::AppHandle,
+) -> DiarizedAttempt {
+    let hot_words = profile_hot_words(state);
+    let response = match send_command_to_server(
+        state,
+        &ServerCommand::TranscribeDiarized {
+            audio_path: audio_path.to_string_lossy().to_string(),
+            options: profile_r2t2_options(state),
+            hot_words,
+        },
+        Some(app_handle),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return DiarizedAttempt::Failed {
+                reason: error.message(),
+            }
+        }
+    };
+
+    if response.success != Some(true) {
+        let reason = response.error.clone().unwrap_or_else(|| "未知错误".into());
+        return match response.error_type.as_deref() {
+            Some(
+                code @ ("diarization_models_missing"
+                | "unsupported_engine"
+                | "audio_too_short"
+                | "unsupported_sample_rate"),
+            ) => DiarizedAttempt::Unavailable {
+                reason: code.to_string(),
+            },
+            _ => DiarizedAttempt::Failed { reason },
+        };
+    }
+
+    let mut segments = response.segments;
+    // 与普通路径保持一致：qwen3 走一次热词纠偏，然后由这里重拼文本。
+    // 不重拼就会出现「分段已纠偏、整体文本还是原样」的两份不一致结果。
+    if response
+        .engine
+        .as_deref()
+        .is_some_and(|engine| engine.starts_with("qwen3-asr-"))
+    {
+        let originals: Vec<String> = segments.iter().map(|item| item.text.clone()).collect();
+        let corrected = state.with_profile(|profile| {
+            originals
+                .into_iter()
+                .map(|text| {
+                    if text.trim().is_empty() {
+                        text
+                    } else {
+                        super::qwen_hotword_service::correct_qwen_profile_terms(&text, profile).text
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        for (segment, text) in segments.iter_mut().zip(corrected) {
+            segment.text = text;
+        }
+    }
+
+    let text = segments
+        .iter()
+        .filter(|segment| !segment.text.trim().is_empty())
+        .map(|segment| format!("说话人 {}：{}", segment.speaker_id + 1, segment.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    DiarizedAttempt::Ok(DiarizedTranscription {
+        text,
+        language: response.language,
+        duration: response.duration,
+        segments,
+        diarization: response.diarization,
+    })
+}
+
 /// Exercise the selected local model without recording, history or private hot words.
 pub(crate) async fn probe_model(
     state: &AppState,
@@ -1723,6 +1835,38 @@ mod tests {
         read_json_response(&mut reader, Duration::from_secs(1), "test")
             .await
             .unwrap()
+    }
+
+    #[test]
+    fn server_response_parses_python_diarization_segments() {
+        // 报文形状照抄 qwen3_asr_server.py 的 `transcribe_diarized` 返回：snake_case。
+        // 这条测试守的是「别给 SpeakerSegment 加 rename_all」——加了之后这里会
+        // 反序列化失败，而线上的表现只是「分离悄悄不生效」，非常难查。
+        let raw = r#"{
+            "success": true,
+            "text": "说话人 1：你好\n说话人 2：在的",
+            "segments": [
+                {"speaker_id": 0, "start_ms": 0, "end_ms": 1500, "text": "你好", "overlap": false},
+                {"speaker_id": 1, "start_ms": 1500, "end_ms": 3000, "text": "在的", "overlap": true}
+            ],
+            "speakers": [{"speaker_id": 0, "segment_count": 1, "duration": 1.5}],
+            "diarization": {"speaker_count": 2, "diarize_ms": 100.0}
+        }"#;
+
+        let response: ServerResponse = serde_json::from_str(raw).expect("parse diarized response");
+
+        assert_eq!(response.segments.len(), 2);
+        assert_eq!(response.segments[0].speaker_id, 0);
+        assert_eq!(response.segments[1].start_ms, 1500);
+        assert!(response.segments[1].overlap);
+        assert_eq!(
+            response
+                .diarization
+                .as_ref()
+                .and_then(|value| value.get("speaker_count"))
+                .and_then(|value| value.as_i64()),
+            Some(2),
+        );
     }
 
     #[test]

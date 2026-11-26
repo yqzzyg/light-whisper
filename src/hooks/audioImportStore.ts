@@ -2,7 +2,12 @@ import type { TFunction } from "i18next";
 import { toast } from "sonner";
 
 import { pickAudioFile, probeAudioFile, transcribeImportedAudio } from "@/api/tauri";
-import type { AudioProbe, PersistentHistoryRecord } from "@/types";
+import type {
+  AudioProbe,
+  DiarizationFallbackReason,
+  HistorySpeakerSegment,
+  PersistentHistoryRecord,
+} from "@/types";
 
 /** 已选中、尚未开始转写的文件。 */
 export interface PickedAudio {
@@ -17,12 +22,26 @@ export interface AudioImportState {
   picked: PickedAudio | null;
   /** 最近一次成功转写的记录，供上传页直接预览；失败或新一轮选择时清空。 */
   result: PersistentHistoryRecord | null;
+  /**
+   * 与 `result` 同一次转写的说话人分段。
+   *
+   * 与 `result` 一起更新，不单独请求：两者对应同一次转写，分两次取会出现
+   * 「正文是新的、分段还是上一份」的中间态。
+   */
+  segments: HistorySpeakerSegment[];
+  /** 没做分离的原因；`null` 表示分离成功，或还没有结果。 */
+  fallbackReason: DiarizationFallbackReason | null;
 }
+
+/** 清空分段时复用同一个空数组，避免每次都是新引用而触发无谓的重渲染。 */
+const EMPTY_SEGMENTS: HistorySpeakerSegment[] = [];
 
 const INITIAL_STATE: AudioImportState = {
   isImporting: false,
   picked: null,
   result: null,
+  segments: EMPTY_SEGMENTS,
+  fallbackReason: null,
 };
 
 /**
@@ -44,6 +63,8 @@ function setState(patch: Partial<AudioImportState>) {
     next.isImporting === state.isImporting
     && next.picked === state.picked
     && next.result === state.result
+    && next.segments === state.segments
+    && next.fallbackReason === state.fallbackReason
   ) {
     return;
   }
@@ -82,7 +103,12 @@ export async function selectAudio(t: TFunction): Promise<void> {
     if (!path) return; // 用户取消：保留当前已选文件与上一次结果。
 
     const probe = await probeAudioFile(path);
-    setState({ picked: { path, probe }, result: null });
+    setState({
+      picked: { path, probe },
+      result: null,
+      segments: EMPTY_SEGMENTS,
+      fallbackReason: null,
+    });
   } catch (error) {
     toast.error(t("toast.importAudioFailed", { error: errorMessage(error) }));
   } finally {
@@ -111,16 +137,23 @@ export async function startImport(t: TFunction): Promise<void> {
   }
 
   busy = true;
-  setState({ isImporting: true, result: null });
+  setState({
+    isImporting: true,
+    result: null,
+    segments: EMPTY_SEGMENTS,
+    fallbackReason: null,
+  });
   try {
-    const record: PersistentHistoryRecord = await transcribeImportedAudio(picked.path);
+    // 一次调用同时拿回正文、分段与降级原因：三者属于同一次转写，
+    // 分开请求会出现「正文已更新、分段还是上一份」的中间态。
+    const { record, segments, fallbackReason } = await transcribeImportedAudio(picked.path);
     if (record.status === "asr_error") {
       // 保留 picked：同一份文件可以直接重试，不必重新选一遍。
       toast.error(t("toast.importAudioFailed", { error: record.error || t("common.retry") }));
       return;
     }
     // 结果直接呈现在上传页，不再用 toast 重复告知。
-    setState({ result: record, picked: null });
+    setState({ result: record, segments, fallbackReason, picked: null });
   } catch (error) {
     toast.error(t("toast.importAudioFailed", { error: errorMessage(error) }));
   } finally {

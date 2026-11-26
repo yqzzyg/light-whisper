@@ -14,7 +14,9 @@ import type {
   AiModelListPayload,
   FunASRStatus,
   HistoryNoteLink,
+  HistorySpeakerSegment,
   HotkeyDiagnostic,
+  ImportedTranscription,
   InputDeviceListPayload,
   JevProvider,
   JevConnection,
@@ -35,6 +37,7 @@ import type {
   NoteQuery,
   NoteRecording,
   NoteRecordingSnapshot,
+  NoteSpeakerSegment,
   NoteSummaryPromptDefaults,
   PersistentHistoryFilter,
   PersistentHistoryPage,
@@ -330,6 +333,16 @@ export function setHistorySettings(
   retentionDays: number,
 ): Promise<void> {
   return invokeCommand<void>("set_history_settings", { enabled, saveAudio, retentionDays });
+}
+
+/**
+ * 开关笔记转写时的说话人分离。
+ *
+ * 只改这一个字段，不整体回写 profile：整体回写会顺带覆盖用户在别处的改动。
+ * 关掉只影响**以后**的转写，已经存下的分段仍会显示。
+ */
+export function setNoteDiarizationEnabled(enabled: boolean): Promise<void> {
+  return invokeCommand<void>("set_note_diarization_enabled", { enabled });
 }
 
 export function setAppProfileRules(rules: AppProfileRule[]): Promise<void> {
@@ -736,9 +749,24 @@ export function probeAudioFile(path: string): Promise<AudioProbe> {
   return invokeCommand<AudioProbe>("probe_audio_file", { path });
 }
 
-/** 导入并转写音频，结果写入历史后返回该历史记录。 */
-export function transcribeImportedAudio(path: string): Promise<PersistentHistoryRecord> {
-  return invokeCommand<PersistentHistoryRecord>("transcribe_imported_audio", { path });
+/**
+ * 导入并转写音频。
+ *
+ * 结果是「历史记录 + 说话人分段 + 降级原因」三件套：后端会在本地引擎下自动
+ * 做说话人分离，条件不满足时退回整段转写，原因放在 `fallbackReason` 里，
+ * 由界面决定要不要提示，而不是当错误处理。
+ */
+export function transcribeImportedAudio(path: string): Promise<ImportedTranscription> {
+  return invokeCommand<ImportedTranscription>("transcribe_imported_audio", { path });
+}
+
+/** 读一条历史的说话人分段；空表表示没分离过，不是错误。 */
+export function listHistorySpeakerSegments(
+  historyId: number,
+): Promise<HistorySpeakerSegment[]> {
+  return invokeCommand<HistorySpeakerSegment[]>("list_history_speaker_segments", {
+    historyId,
+  });
 }
 
 export interface ModelsDirUpdateResult {
@@ -906,6 +934,17 @@ export function transcribeNoteRecording(
   force = false,
 ): Promise<NoteDetail> {
   return invokeCommand<NoteDetail>("transcribe_note_recording", { noteId, force });
+}
+
+/**
+ * 读一篇笔记所有录音的说话人分段。
+ *
+ * 返回空数组是**正常状态**，不是错误：说话人分离关了、引擎是在线的、录音超过两
+ * 小时、分离模型没下载、或者分离那一步失败降级，最终都只是「没有分段」。界面据此
+ * 退回按整段正文显示，不弹错误。
+ */
+export function listNoteSpeakerSegments(noteId: number): Promise<NoteSpeakerSegment[]> {
+  return invokeCommand<NoteSpeakerSegment[]>("list_note_speaker_segments", { noteId });
 }
 
 /**

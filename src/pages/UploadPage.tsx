@@ -37,7 +37,7 @@ export default function UploadPage({
   animClass?: string;
 }) {
   const { t } = useTranslation();
-  const { isImporting, picked, result, selectAudio, startImport, cancelSelection }
+  const { isImporting, picked, result, segments, fallbackReason, selectAudio, startImport, cancelSelection }
     = useAudioImport();
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -184,6 +184,8 @@ export default function UploadPage({
                 polishMs: result?.polishMs ?? undefined,
                 totalMs: result?.totalMs ?? undefined,
               }}
+              segments={segments}
+              fallbackReason={fallbackReason}
             />
             <p className="upload-result-hint">{t("upload.resultHint")}</p>
             {finalResult && (

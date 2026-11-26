@@ -527,6 +527,21 @@ class BaseASRServer:
                 audio_format=command.get("audio_format"),
                 sample_rate=command.get("sample_rate"),
             )
+        if action == "transcribe_diarized":
+            # Only engines that implement it can serve this; R2T2 returns a
+            # typed error so the Rust layer falls back to `transcribe`.
+            handler = getattr(self, "transcribe_diarized", None)
+            if handler is None:
+                return {
+                    "success": False,
+                    "error": f"当前引擎不支持说话人分离: {self.engine}",
+                    "type": "unsupported_engine",
+                }
+            return handler(
+                command.get("audio_path"),
+                command.get("options", {}),
+                hot_words=command.get("hot_words"),
+            )
         if action == "status":
             return self._with_gpu_suspend_flag(self.check_status())
         if action == "stats":

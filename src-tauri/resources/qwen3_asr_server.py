@@ -27,6 +27,9 @@ logger = setup_rotating_logger(__name__, "qwen3_asr_server.log", "Qwen3-ASR服�
 from hf_cache_utils import QWEN3_ASR_MODELS, find_hf_snapshot_file
 
 QWEN3_VAD_SAMPLE_RATE = 16_000
+# Below this, there are too few embeddings for clustering to say anything and
+# the plain path is both faster and more accurate.
+MIN_DIARIZATION_SECONDS = 30.0
 
 
 class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
@@ -161,8 +164,14 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
         return np.ascontiguousarray(audio[start:end]), len(chunks), vad_ms
 
     def _run_inference(self, audio, *, context="", language=None):
+        session = self.session
+        if session is None:
+            # 运行时已被卸掉时给一句能看懂的错误。真正的防线是持锁不卸载
+            # （见 gpu_idle.GPU_IDLE_ACTIVITY_ACTIONS），因为句柄被释放后仍非
+            # None 的情况只能靠不并发来避免，Python 层拦不住 access violation。
+            raise RuntimeError("ASR 运行时未加载，无法识别")
         with self.stdout_suppressor.suppress():
-            return self.session.run(audio, timestamps="none", context=context, language=language)
+            return session.run(audio, timestamps="none", context=context, language=language)
 
     def _transcribe_stream_audio(self, audio, *, context="", language=None):
         # Stream callbacks bypass the offline busy guard. VAD runs once for
@@ -356,6 +365,264 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
                 "error": f"音频转录失败: {exc}",
                 "type": "transcription_error",
                 "input_mode": input_mode,
+            }
+
+    def _diarizer(self):
+        """Build the diarization pipeline once; models stay resident afterwards.
+
+        Returns None when either model is missing — callers must degrade to the
+        plain transcription path instead of failing the request.
+        """
+        cached = getattr(self, "_diarizer_cache", None)
+        if cached is not None:
+            return cached
+
+        from speaker_diarize import Diarizer
+        from speaker_embedding import SpeakerEmbedder, SpeakerEmbeddingOptions
+        from speaker_models import find_embedding_model, find_segmentation_model
+        from speaker_segmentation import SpeakerSegmenter, SpeakerSegmentationOptions
+
+        segmentation_path = find_segmentation_model()
+        embedding_path = find_embedding_model()
+        if segmentation_path is None or embedding_path is None:
+            return None
+
+        # Diarization runs on CPU while the ASR session is loaded; cap the
+        # threads so it does not starve the recognition call that follows.
+        threads = max(1, min(4, (os.cpu_count() or 4) // 2))
+        segmenter = SpeakerSegmenter(
+            segmentation_path, SpeakerSegmentationOptions(num_threads=threads)
+        )
+        embedder = SpeakerEmbedder(
+            embedding_path, SpeakerEmbeddingOptions(num_threads=threads)
+        )
+        diarizer = Diarizer(segmenter, embedder)
+        self._diarizer_cache = diarizer
+        logger.info("说话人分离模型加载完成（分段 + 声纹）")
+        return diarizer
+
+    def _diarization_progress(self, payload):
+        phase = payload.get("phase")
+        fraction = round(float(payload.get("fraction", 0.0)), 3)
+        if phase == "segment":
+            self.report_progress("diarize_segment", fraction=fraction)
+        elif phase == "embed":
+            self.report_progress("diarize_embed", fraction=fraction)
+
+    def transcribe_diarized(self, audio_path, options=None, hot_words=None):
+        """Segment by speaker, then transcribe each segment in order.
+
+        Every failure returns a typed error so the Rust layer can fall back to
+        the plain path without guessing; diarization is a side channel and must
+        never cost the user their transcript.
+        """
+        import numpy as np
+        import soundfile as sf
+
+        if not self.initialized:
+            init_result = self.initialize()
+            if not init_result["success"]:
+                return init_result
+        if self._stream_is_active():
+            return self._stream_busy_response()
+
+        options = options if isinstance(options, dict) else {}
+        if not audio_path or not os.path.exists(audio_path):
+            return {
+                "success": False,
+                "error": f"音频文件不存在: {audio_path}",
+                "type": "input_error",
+            }
+
+        try:
+            with sf.SoundFile(audio_path) as handle:
+                source_rate = handle.samplerate
+                duration = len(handle) / float(source_rate)
+        except Exception as exc:
+            logger.error("读取音频失败: %s", exc)
+            return {
+                "success": False,
+                "error": f"无法读取音频: {exc}",
+                "type": "input_error",
+            }
+
+        if source_rate != QWEN3_VAD_SAMPLE_RATE:
+            return {
+                "success": False,
+                "error": f"说话人分离要求 {QWEN3_VAD_SAMPLE_RATE} Hz 音频，实际 {source_rate} Hz",
+                "type": "unsupported_sample_rate",
+            }
+        if duration < MIN_DIARIZATION_SECONDS:
+            return {
+                "success": False,
+                "error": "录音过短，无需说话人分离",
+                "type": "audio_too_short",
+            }
+
+        try:
+            diarizer = self._diarizer()
+        except Exception as exc:
+            logger.error("说话人分离模型加载失败: %s", exc)
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "error": f"说话人分离模型加载失败: {exc}",
+                "type": "diarization_error",
+            }
+        if diarizer is None:
+            from speaker_models import missing_models
+
+            return {
+                "success": False,
+                "error": "说话人分离模型未下载",
+                "type": "diarization_models_missing",
+                "missing": missing_models(),
+            }
+
+        try:
+            self.report_progress("diarize_segment", duration=round(duration, 3))
+            started = time.perf_counter()
+            result = diarizer.run(audio_path, progress=self._diarization_progress)
+            diarize_ms = (time.perf_counter() - started) * 1000
+            if not result.segments:
+                return {
+                    "success": True,
+                    "text": "",
+                    "raw_text": "",
+                    "duration": round(duration, 3),
+                    "speech_duration": 0.0,
+                    "language": "unknown",
+                    "engine": self.engine,
+                    "model_type": self.engine,
+                    "backend": self.backend,
+                    "input_mode": "path",
+                    "segments": [],
+                    "speakers": [],
+                    "fallback_reason": "no_speech",
+                }
+
+            context = self._compose_context(
+                options.get("context", ""),
+                hot_words if hot_words is not None else options.get("hot_words", []),
+            )
+            language_option = self._normalize_language(options.get("language"))
+
+            # 分离阶段可能比空闲超时还长（一小时的录音约 100 秒，两小时更久）。
+            # 现在 transcribe_diarized 会像 transcribe 一样整段持锁，看门狗进不来；
+            # 但卸模型是另一条线程的动作，历史上就是在这里被卸掉后打到野指针的，
+            # 所以开始逐段识别前再确认一次运行时就位。
+            if not self.initialized or self.session is None:
+                if self.session is None:
+                    # 已 initialized 但运行时丢了：initialize() 会因为 initialized
+                    # 为真直接返回，必须先清干净再重载。
+                    self._close_runtime()
+                reload_result = self.initialize()
+                if not reload_result.get("success"):
+                    return reload_result
+
+            self.report_progress(
+                "diarize_asr_start", segments=len(result.segments), speakers=result.speaker_count
+            )
+            segments_out = []
+            detected_language = None
+            inference_ms = 0.0
+            total = len(result.segments)
+            with sf.SoundFile(audio_path) as handle:
+                for index, segment in enumerate(result.segments):
+                    begin = max(0, int(segment.start * source_rate))
+                    finish = min(int(segment.end * source_rate), len(handle))
+                    if finish - begin < int(0.2 * source_rate):
+                        continue
+                    handle.seek(begin)
+                    chunk = handle.read(finish - begin, dtype="float32", always_2d=True)
+                    pcm = np.ascontiguousarray(chunk.mean(axis=1, dtype=np.float32))
+                    segment_started = time.perf_counter()
+                    output = self._run_inference(
+                        pcm, context=context, language=language_option
+                    )
+                    inference_ms += (time.perf_counter() - segment_started) * 1000
+                    text = (output.text or "").strip()
+                    if text and detected_language is None:
+                        detected_language = output.language or "unknown"
+                    segments_out.append(
+                        {
+                            "speaker_id": int(segment.speaker_id),
+                            "start_ms": int(round(segment.start * 1000)),
+                            "end_ms": int(round(segment.end * 1000)),
+                            "text": text,
+                            "overlap": bool(segment.overlap),
+                        }
+                    )
+                    # One progress line per segment would flood the pipe on a
+                    # one-hour recording; every fifth is plenty for a heartbeat.
+                    if index % 5 == 0 or index == total - 1:
+                        self.report_progress(
+                            "diarize_asr", done=index + 1, total=total
+                        )
+
+            labels = {
+                speaker: f"说话人 {speaker + 1}" for speaker in range(result.speaker_count)
+            }
+            lines = [
+                f"{labels.get(item['speaker_id'], item['speaker_id'])}：{item['text']}"
+                for item in segments_out
+                if item["text"]
+            ]
+            text = "\n".join(lines)
+
+            durations: dict[int, float] = {}
+            for item in segments_out:
+                durations[item["speaker_id"]] = durations.get(item["speaker_id"], 0.0) + (
+                    item["end_ms"] - item["start_ms"]
+                ) / 1000.0
+            speakers_out = [
+                {
+                    "speaker_id": speaker,
+                    "segment_count": sum(
+                        1 for item in segments_out if item["speaker_id"] == speaker
+                    ),
+                    "duration": round(value, 3),
+                }
+                for speaker, value in sorted(durations.items())
+            ]
+
+            speech_duration = sum(segment.duration for segment in result.segments)
+            self.report_progress(
+                "diarize_done",
+                speakers=result.speaker_count,
+                diarize_ms=round(diarize_ms, 3),
+            )
+            self._total_inference_ms += inference_ms
+            self.transcription_count += 1
+            return {
+                "success": True,
+                "text": text,
+                "raw_text": text,
+                "duration": round(duration, 3),
+                "speech_duration": round(speech_duration, 3),
+                "language": detected_language or "unknown",
+                "engine": self.engine,
+                "model_type": self.engine,
+                "backend": self.backend,
+                "input_mode": "path",
+                "segments": segments_out,
+                "speakers": speakers_out,
+                "diarization": {
+                    "segmentation": "pyannote-segmentation-3.0",
+                    "embedding": "cam++",
+                    "speaker_count": result.speaker_count,
+                    "diarize_ms": round(diarize_ms, 1),
+                    "inference_ms": round(inference_ms, 1),
+                    **result.stats,
+                },
+            }
+        except Exception as exc:
+            logger.error("说话人分离转写失败: %s", exc)
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "error": f"说话人分离转写失败: {exc}",
+                "type": "diarization_error",
             }
 
     def get_performance_stats(self):

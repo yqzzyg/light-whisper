@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   deleteNote: vi.fn(),
   deleteNoteRecording: vi.fn(),
   listNoteRecordings: vi.fn(),
+  listNoteSpeakerSegments: vi.fn(),
   moveNote: vi.fn(),
   createNoteFromHistory: vi.fn(),
   findNoteByHistory: vi.fn(),
@@ -89,6 +90,8 @@ beforeEach(() => {
   api.listNotes.mockResolvedValue(page([listItem(1, "周会记录")]));
   api.getNote.mockResolvedValue(detail(1, "周会记录"));
   api.listNoteRecordings.mockResolvedValue([]);
+  // 绝大多数用例不关心说话人分段：默认「没有分段」即退回整段正文。
+  api.listNoteSpeakerSegments.mockResolvedValue([]);
   api.updateNote.mockImplementation(async (id: number, patch: { title?: string; content?: string }) => ({
     ...detail(id, patch.title ?? "周会记录"),
   }));
@@ -274,6 +277,34 @@ describe("notesStore", () => {
 
     expect(api.listNoteRecordings).toHaveBeenCalledWith(1);
     expect(getNotesSnapshot().recordings).toEqual([segment]);
+  });
+
+  it("loads speaker segments in the same open-note round trip", async () => {
+    const turn = {
+      recordingId: 7,
+      speakerId: 0,
+      startMs: 0,
+      endMs: 1_500,
+      text: "甲说话。",
+      overlap: false,
+    };
+    api.listNoteSpeakerSegments.mockResolvedValue([turn]);
+
+    await openNote(1);
+
+    expect(api.listNoteSpeakerSegments).toHaveBeenCalledWith(1);
+    expect(getNotesSnapshot().speakerSegments).toEqual([turn]);
+  });
+
+  it("keeps the note usable when the speaker segments cannot be read", async () => {
+    // 分段是渲染增强：读失败只该退回整段正文，不该让笔记打不开。
+    api.listNoteSpeakerSegments.mockRejectedValue(new Error("读取录音分段任务失败"));
+
+    await openNote(1);
+
+    expect(getNotesSnapshot().note?.id).toBe(1);
+    expect(getNotesSnapshot().speakerSegments).toEqual([]);
+    expect(getNotesSnapshot().error).toBeNull();
   });
 
   it("reloads the note after deleting a recording segment", async () => {

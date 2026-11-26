@@ -49,8 +49,16 @@ function successRecord(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function probe(overrides: Record<string, unknown> = {}) {
-  return {
+/** 后端 `transcribe_imported_audio` 的返回形状：历史记录 + 分段 + 降级原因。 */
+function transcriptionResponse(
+  overrides: Record<string, unknown> = {},
+  segments: unknown[] = [],
+  fallbackReason: string | null = null,
+) {
+  return { record: successRecord(overrides), segments, fallbackReason };
+}
+
+function probe(overrides: Record<string, unknown> = {}) {  return {
     durationSec: 317,
     sizeBytes: 5 * 1024 * 1024,
     sampleRate: 44100,
@@ -79,7 +87,7 @@ describe("useAudioImport", () => {
     vi.clearAllMocks();
     mocks.pickAudioFile.mockResolvedValue("C:/audio/test.wav");
     mocks.probeAudioFile.mockResolvedValue(probe());
-    mocks.transcribeImportedAudio.mockResolvedValue(successRecord());
+    mocks.transcribeImportedAudio.mockResolvedValue(transcriptionResponse());
   });
 
   afterEach(() => {
@@ -192,7 +200,7 @@ describe("useAudioImport", () => {
     });
     await waitFor(() => expect(result.current.result).toBeNull());
     await act(async () => {
-      resolveTranscribe(successRecord({ id: 2, text: "新结果" }));
+      resolveTranscribe(transcriptionResponse({ id: 2, text: "新结果" }));
       await pending;
     });
     expect(result.current.result?.text).toBe("新结果");
@@ -200,7 +208,7 @@ describe("useAudioImport", () => {
 
   it("shows an error toast when the record is asr_error and keeps the selection", async () => {
     mocks.transcribeImportedAudio.mockResolvedValue(
-      successRecord({ status: "asr_error", error: "音频过长" }),
+      transcriptionResponse({ status: "asr_error", error: "音频过长" }),
     );
     const { result } = renderHook(() => useAudioImport());
 
@@ -290,12 +298,62 @@ describe("useAudioImport", () => {
 
     first.unmount();
     await act(async () => {
-      resolveTranscribe(successRecord({ id: 9, text: "离开页面后才出的结果" }));
+      resolveTranscribe(transcriptionResponse({ id: 9, text: "离开页面后才出的结果" }));
       await pending;
     });
 
     const second = renderHook(() => useAudioImport());
     expect(second.result.current.result?.text).toBe("离开页面后才出的结果");
     expect(second.result.current.isImporting).toBe(false);
+  });
+
+  it("keeps the speaker segments and the fallback reason of the same response", async () => {
+    mocks.transcribeImportedAudio.mockResolvedValue(
+      transcriptionResponse(
+        {},
+        [
+          { speakerId: 0, startMs: 0, endMs: 2_000, text: "你好", overlap: false },
+          { speakerId: 1, startMs: 2_000, endMs: 4_000, text: "在的", overlap: true },
+        ],
+        "models_missing",
+      ),
+    );
+    const { result } = renderHook(() => useAudioImport());
+
+    await pickAndStart(result);
+
+    expect(result.current.segments).toHaveLength(2);
+    expect(result.current.segments[1].speakerId).toBe(1);
+    expect(result.current.fallbackReason).toBe("models_missing");
+  });
+
+  it("drops the previous segments as soon as a new import starts", async () => {
+    mocks.transcribeImportedAudio.mockResolvedValue(
+      transcriptionResponse({}, [
+        { speakerId: 0, startMs: 0, endMs: 2_000, text: "上一份", overlap: false },
+      ]),
+    );
+    const { result } = renderHook(() => useAudioImport());
+    await pickAndStart(result);
+    expect(result.current.segments).toHaveLength(1);
+
+    let resolveTranscribe!: (value: unknown) => void;
+    mocks.transcribeImportedAudio.mockImplementation(
+      () => new Promise((resolve) => { resolveTranscribe = resolve; }),
+    );
+    await act(async () => {
+      await result.current.selectAudio();
+    });
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.startImport();
+    });
+
+    // 转写一开始就要清空，否则新结果出来前会短暂显示上一份的分段。
+    await waitFor(() => expect(result.current.segments).toHaveLength(0));
+    await act(async () => {
+      resolveTranscribe(transcriptionResponse({ id: 2 }));
+      await pending;
+    });
   });
 });

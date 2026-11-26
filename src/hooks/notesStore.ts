@@ -11,13 +11,21 @@ import {
   getNote,
   listNoteFolders,
   listNoteRecordings,
+  listNoteSpeakerSegments,
   listNotes,
   moveNote as apiMoveNote,
   renameNoteFolder as apiRenameNoteFolder,
   reorderNoteFolders as apiReorderNoteFolders,
   updateNote as apiUpdateNote,
 } from "@/api/tauri";
-import type { NoteDetail, NoteFolder, NoteListItem, NotePatch, NoteRecording } from "@/types/notes";
+import type {
+  NoteDetail,
+  NoteFolder,
+  NoteListItem,
+  NotePatch,
+  NoteRecording,
+  NoteSpeakerSegment,
+} from "@/types/notes";
 
 const PAGE_SIZE = 200;
 /// 自动保存防抖：太短会把每个字符都发一次 IPC，太长会在强制退出时丢字。
@@ -39,6 +47,11 @@ export interface NotesState {
   note: NoteDetail | null;
   /** 当前笔记的录音段，按录音时间正序；与 note 共用同一个请求令牌。 */
   recordings: NoteRecording[];
+  /**
+   * 说话人分段，跨所有录音段拍平。空数组就是「这次没有分离」，界面据此退回
+   * 整段正文；它只影响渲染，不参与摘要与导出。
+   */
+  speakerSegments: NoteSpeakerSegment[];
   loadingFolders: boolean;
   loadingNotes: boolean;
   loadingNote: boolean;
@@ -58,6 +71,7 @@ const initialState: NotesState = {
   selectedNoteId: null,
   note: null,
   recordings: [],
+  speakerSegments: [],
   loadingFolders: false,
   loadingNotes: false,
   loadingNote: false,
@@ -194,16 +208,34 @@ export async function setQuery(query: string): Promise<void> {
   await refreshNotes(true);
 }
 
+/**
+ * 打开一篇笔记要读的三份数据。
+ *
+ * 说话人分段是渲染增强：读失败就当「没有分段」退回整段正文，不让它把整篇笔记的
+ * 打开拖挂。分段为空本身是正常状态（关了这个功能、在线引擎、录音太长、降级）。
+ */
+async function loadNoteBundle(
+  id: number,
+): Promise<[NoteDetail | null, NoteRecording[], NoteSpeakerSegment[]]> {
+  const [note, recordings, speakerSegments] = await Promise.all([
+    getNote(id),
+    listNoteRecordings(id),
+    listNoteSpeakerSegments(id).catch(() => [] as NoteSpeakerSegment[]),
+  ]);
+  return [note, recordings, speakerSegments];
+}
+
 export async function openNote(id: number): Promise<void> {
   await flushNoteSave();
   const token = ++noteToken;
   emit({ selectedNoteId: id, loadingNote: true });
   try {
-    const [note, recordings] = await Promise.all([getNote(id), listNoteRecordings(id)]);
+    const [note, recordings, speakerSegments] = await loadNoteBundle(id);
     if (token !== noteToken) return;
     emit({
       note,
       recordings,
+      speakerSegments,
       selectedNoteId: note ? note.id : null,
       activeFolderId: note ? note.folderId : state.activeFolderId,
       loadingNote: false,
@@ -218,7 +250,13 @@ export async function openNote(id: number): Promise<void> {
 export function closeNote(): void {
   void flushNoteSave();
   noteToken += 1;
-  emit({ selectedNoteId: null, note: null, recordings: [], loadingNote: false });
+  emit({
+    selectedNoteId: null,
+    note: null,
+    recordings: [],
+    speakerSegments: [],
+    loadingNote: false,
+  });
 }
 
 /**
@@ -233,9 +271,9 @@ export async function reloadOpenNote(): Promise<void> {
   await flushNoteSave();
   const token = ++noteToken;
   try {
-    const [note, recordings] = await Promise.all([getNote(id), listNoteRecordings(id)]);
+    const [note, recordings, speakerSegments] = await loadNoteBundle(id);
     if (token !== noteToken || state.selectedNoteId !== id) return;
-    emit({ note, recordings });
+    emit({ note, recordings, speakerSegments });
   } catch (error) {
     // 重读失败不影响当前展示，下次打开会重新拉。
     console.warn("刷新笔记失败:", messageOf(error));
@@ -356,10 +394,11 @@ export async function createNoteFromHistory(historyId: number): Promise<NoteDeta
   const note = await apiCreateNoteFromHistory(historyId);
   await Promise.all([refreshFolders(), refreshNotes(true)]);
   // 历史转存来的笔记没有录音段：音频仍归历史记录。
-  emit({
-    selectedNoteId: note.id,
-    note,
-    recordings: [],
+    emit({
+      selectedNoteId: note.id,
+      note,
+      recordings: [],
+      speakerSegments: [],
     activeFolderId: note.folderId,
     collapsedFolderIds: expandFolder(state.collapsedFolderIds, note.folderId),
     loadingNote: false,
@@ -411,7 +450,7 @@ export async function removeNote(id: number): Promise<void> {
     await apiDeleteNote(id);
     if (state.selectedNoteId === id) {
       noteToken += 1;
-      emit({ selectedNoteId: null, note: null, recordings: [] });
+      emit({ selectedNoteId: null, note: null, recordings: [], speakerSegments: [] });
     }
     await Promise.all([refreshFolders(), refreshNotes(true)]);
   } catch (error) {

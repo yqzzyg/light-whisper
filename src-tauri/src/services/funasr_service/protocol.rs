@@ -60,6 +60,17 @@ pub enum ServerCommand {
         #[serde(skip_serializing_if = "Option::is_none")]
         hot_words: Option<Vec<String>>,
     },
+    /// 说话人分离转写：先按说话人分段，再逐段识别。
+    ///
+    /// 只有本地引擎 + 磁盘路径可用。服务端在不可用时返回带 `type` 的错误，
+    /// 由调用方降级到 [`ServerCommand::Transcribe`]，而不是让请求失败。
+    TranscribeDiarized {
+        audio_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        options: Option<crate::state::user_profile::R2T2Config>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hot_words: Option<Vec<String>>,
+    },
     /// 查询服务器状态
     Status,
     /// 更新 GPU 空闲卸载秒数。0 表示关闭，不重启进程。
@@ -116,6 +127,16 @@ pub(super) struct ServerResponse {
     pub(super) engine: Option<String>,
     /// 服务端实际采用的输入模式（memory/path）
     pub(super) input_mode: Option<String>,
+    /// 服务端的错误类型标识（`diarization_models_missing` 等）。
+    /// 用它区分「可降级」与「真失败」，而不是靠匹配错误文案。
+    #[serde(rename = "type")]
+    pub(super) error_type: Option<String>,
+    /// 说话人分离产出的分段，按时间顺序；未走分离时为空。
+    #[serde(default)]
+    pub(super) segments: Vec<crate::services::notes_service::SpeakerSegment>,
+    /// 分离过程的诊断信息（耗时、窗数、重叠比例等），仅用于日志与前端展示。
+    #[serde(default)]
+    pub(super) diarization: Option<serde_json::Value>,
 }
 
 /// Python status 返回的模型状态

@@ -27,6 +27,27 @@ HF_ENDPOINT = os.environ.get("HF_ENDPOINT", DEFAULT_HF_ENDPOINT).rstrip("/")
 HF_FALLBACK_ENDPOINT = os.environ.get("HF_FALLBACK_ENDPOINT", DEFAULT_HF_FALLBACK_ENDPOINT).rstrip("/")
 COMPLETE_MANIFEST_NAME = ".light_whisper_complete.json"
 
+# Speaker diarization assets. Both are ordinary (non-gated) HF repos that mirror
+# the sherpa-onnx release files, so they use the same download path as the ASR
+# models. Sizes are intentionally omitted: the API does not report them and the
+# downloader falls back to on-disk size during manifest validation.
+DIARIZATION_MODELS = [
+    {
+        "name": "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0",
+        "type": "diarization_segmentation",
+        "revision": "main",
+        "files": [{"rfilename": "model.onnx"}],
+    },
+    {
+        "name": "csukuangfj/speaker-embedding-models",
+        "type": "diarization_embedding",
+        "revision": "main",
+        "files": [
+            {"rfilename": "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"}
+        ],
+    },
+]
+
 _progress = {}
 _completed_count = 0
 _total_count = 0
@@ -452,6 +473,8 @@ def download_model(model_config):
 def main(engine=None):
     global _total_count
 
+    with_diarization = os.environ.get("LIGHT_WHISPER_WITH_DIARIZATION") == "1"
+
     if engine is None:
         import argparse
         parser = argparse.ArgumentParser()
@@ -460,8 +483,14 @@ def main(engine=None):
             default="qwen3-asr-0.6b",
             choices=["qwen3-asr-0.6b", "confucius4-r2t2"],
         )
+        parser.add_argument(
+            "--with-diarization",
+            action="store_true",
+            help="同时下载说话人分离模型（分段 + 声纹，约 33MB）",
+        )
         args = parser.parse_args()
         engine = args.engine
+        with_diarization = with_diarization or args.with_diarization
 
     if engine in LOCAL_ASR_MODELS:
         config = LOCAL_ASR_MODELS[engine]
@@ -481,6 +510,9 @@ def main(engine=None):
         ]
     else:
         raise ValueError(f"不支持的本地 ASR 引擎: {engine}")
+
+    if with_diarization:
+        models.extend(DIARIZATION_MODELS)
 
     _total_count = len(models)
     for m in models:

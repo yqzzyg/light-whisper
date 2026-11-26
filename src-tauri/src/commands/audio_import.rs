@@ -11,6 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::Emitter;
 
+use crate::services::history_service::SpeakerSegment;
 use crate::services::transcription_service::{self, AudioInput, TranscribeOptions};
 use crate::services::{audio_import_service, history_service};
 use crate::state::AppState;
@@ -18,6 +19,48 @@ use crate::utils::{paths, AppError};
 
 fn emit_history_updated(app_handle: &tauri::AppHandle, id: Option<i64>) {
     let _ = app_handle.emit("history-updated", serde_json::json!({ "id": id }));
+}
+
+/// 一段带说话人的转写，camelCase 直供前端渲染。
+///
+/// 与 `history_service::SpeakerSegment` 分开是有意的：那个结构是 Python IPC 的
+/// 反序列化目标（snake_case），这个结构是给 WebView 的展示契约。混用一个结构
+/// 迟早要在 serde 属性上二选一，然后 IPC 解析就会悄悄失败。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedSpeakerSegment {
+    pub speaker_id: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    pub overlap: bool,
+}
+
+impl From<SpeakerSegment> for ImportedSpeakerSegment {
+    fn from(segment: SpeakerSegment) -> Self {
+        Self {
+            speaker_id: segment.speaker_id,
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            text: segment.text,
+            overlap: segment.overlap,
+        }
+    }
+}
+
+/// 导入转写的结果：历史记录 + 说话人分段 + 降级原因。
+///
+/// 不把分段塞进 `HistoryRecord`：那个结构被历史列表、剪贴板、笔记等一堆地方共用，
+/// 加一个只在导入页有用的字段会让每次列表查询都白读一遍分段表。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedTranscription {
+    pub record: history_service::HistoryRecord,
+    /// 按时间排好序的分段；空表示这次没有分离。
+    pub segments: Vec<ImportedSpeakerSegment>,
+    /// 没做分离的原因码（`disabled` / `online_engine` / `too_long` /
+    /// `models_missing` …）；`None` 表示真的分离了。
+    pub fallback_reason: Option<String>,
 }
 
 /// 分配一个导入专用的 session_id。
@@ -88,16 +131,19 @@ pub async fn probe_audio_file(path: String) -> Result<AudioProbe, AppError> {
     })
 }
 
-/// 导入并转写音频，返回历史记录。
+/// 导入并转写音频，返回历史记录、说话人分段与降级原因。
+///
+/// 分离在这里是**自动**的：本地引擎、开关开着、时长不超过两小时就分，否则
+/// 退回整段转写并在 `fallback_reason` 里带回原因（前端据此提示，不弹错）。
 ///
 /// 失败时也会写入一条 `asr_error` 历史记录并正常返回（不抛 Err），
-/// 遵循 finalize 的错误留痕惯例；前端按 `status` 判断成败。
+/// 遵循 finalize 的错误留痕惯例；前端按 `record.status` 判断成败。
 #[tauri::command]
 pub async fn transcribe_imported_audio(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     path: String,
-) -> Result<history_service::HistoryRecord, AppError> {
+) -> Result<ImportedTranscription, AppError> {
     let started = Instant::now();
     let engine = paths::read_engine_config();
     let session_id = next_import_session_id();
@@ -117,7 +163,9 @@ pub async fn transcribe_imported_audio(
         .ok_or_else(|| AppError::Asr("导入转写失败：历史音频路径无效".into()))?;
 
     let asr_started = Instant::now();
-    let asr_result = transcription_service::transcribe(
+    // 走「可能分离」的统一入口：它内部先判条件再拿锁，条件不满足就转发给
+    // 普通转写并把原因带回来。命令层不判断引擎、不判断开关、不判断时长。
+    let transcription = transcription_service::transcribe_with_speakers(
         &app_handle,
         state.inner(),
         AudioInput::File(&audio_path),
@@ -126,19 +174,38 @@ pub async fn transcribe_imported_audio(
     .await;
     let asr_ms = Some(asr_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
 
-    let (status, text, original_text, language, error) = match asr_result {
-        Ok(result) => {
-            let text = result.text.trim().to_string();
-            ("success", text.clone(), text, result.language, None)
-        }
-        Err(error) => (
-            "asr_error",
-            String::new(),
-            String::new(),
-            None,
-            Some(error.message()),
-        ),
-    };
+    let (status, text, original_text, language, error, segments, fallback_reason) =
+        match transcription {
+            Ok(outcome) => {
+                // 分离成功时这里已经是「说话人 1：…\n说话人 2：…」的多行正文，
+                // 所以历史里存的正文本身就带说话人，历史页不用另做渲染。
+                let text = outcome.result.text.trim().to_string();
+                (
+                    "success",
+                    text.clone(),
+                    text,
+                    outcome.result.language,
+                    None,
+                    outcome.segments,
+                    outcome
+                        .fallback_reason
+                        .map(|reason| reason.code().to_string()),
+                )
+            }
+            Err(error) => (
+                "asr_error",
+                String::new(),
+                String::new(),
+                None,
+                Some(error.message()),
+                Vec::new(),
+                None,
+            ),
+        };
+
+    if let Some(reason) = fallback_reason.as_deref() {
+        log::info!("导入转写未做说话人分离: {reason}");
+    }
 
     // 成功则沿用已落盘的文件；失败把音频删掉，失败记录只留痕、不占文件。
     let audio_file = if status == "success" {
@@ -149,7 +216,9 @@ pub async fn transcribe_imported_audio(
     };
 
     let total_ms = Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
-    let new_id = history_service::insert(
+    let response_segments: Vec<ImportedSpeakerSegment> =
+        segments.iter().cloned().map(Into::into).collect();
+    let new_id = history_service::insert_with_segments(
         history_service::HistoryDraft {
             session_id,
             mode: "import".into(),
@@ -173,6 +242,7 @@ pub async fn transcribe_imported_audio(
             error,
             reprocessed_from_id: None,
         },
+        segments,
         retention_days,
     )
     .await
@@ -180,11 +250,31 @@ pub async fn transcribe_imported_audio(
 
     emit_history_updated(&app_handle, Some(new_id));
 
-    history_service::get(new_id)
+    let record = history_service::get(new_id)
         .await
         .map_err(|e| AppError::Asr(format!("读取导入历史失败: {e}")))?
         .map(|stored| stored.record)
-        .ok_or_else(|| AppError::Asr("读取导入历史失败：记录不存在".into()))
+        .ok_or_else(|| AppError::Asr("读取导入历史失败：记录不存在".into()))?;
+
+    Ok(ImportedTranscription {
+        record,
+        segments: response_segments,
+        fallback_reason,
+    })
+}
+
+/// 读一条历史的说话人分段。
+///
+/// 上传页刷新、或从历史里重新打开一条记录时用它取分段。返回空表就是没分离过，
+/// 与笔记侧的 `list_note_speaker_segments` 同一套语义。
+#[tauri::command]
+pub async fn list_history_speaker_segments(
+    history_id: i64,
+) -> Result<Vec<ImportedSpeakerSegment>, AppError> {
+    let segments = history_service::list_segments(history_id)
+        .await
+        .map_err(AppError::Asr)?;
+    Ok(segments.into_iter().map(Into::into).collect())
 }
 
 #[cfg(test)]

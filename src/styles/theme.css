@@ -50,6 +50,15 @@
   --color-assistant-glow: rgba(117, 87, 217, 0.34);
   --color-learned: #10b981;
 
+  /* 说话人配色：转录里按人分色。固定 6 种、按 speakerId % 6 取，
+     超出部分与前面重复——人再多，颜色也只是辅助，姓名标签才是判据。 */
+  --speaker-1: #ae5630;
+  --speaker-2: #2c6fbb;
+  --speaker-3: #2e8b57;
+  --speaker-4: #b07b16;
+  --speaker-5: #7557d9;
+  --speaker-6: #2f8f8f;
+
   /* Shadows — enhanced for subtle background distinction */
   --shadow-xs: 0 1px 2px rgba(45, 40, 32, 0.06);
   --shadow-sm: 0 2px 4px rgba(45, 40, 32, 0.08), 0 1px 2px rgba(45, 40, 32, 0.04);
@@ -176,6 +185,14 @@
   --color-assistant: #a78bfa;
   --color-assistant-glow: rgba(167, 139, 250, 0.34);
   --color-learned: #34d399;
+
+  /* 深色下同一组颜色要提亮，否则压在深底上分不清。 */
+  --speaker-1: #d97757;
+  --speaker-2: #5a9bd5;
+  --speaker-3: #5db86a;
+  --speaker-4: #e0a030;
+  --speaker-5: #a78bfa;
+  --speaker-6: #4fb3b3;
 
   --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.15);
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.20), 0 1px 2px rgba(0, 0, 0, 0.12);

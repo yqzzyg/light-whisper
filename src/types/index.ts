@@ -249,7 +249,19 @@ export interface UserProfile {
   note_summary_prompt?: string | null;
   /** 长会议分段提炼提示词，支持 `{index}` / `{total}` 占位符。 */
   note_summary_part_prompt?: string | null;
+  /** 笔记相关开关；缺失按后端默认值（分离默认开）。 */
+  note_settings?: NoteSettings;
 }
+
+/** 笔记转写相关开关。 */
+export interface NoteSettings {
+  /** 笔记转写时自动做说话人分离；关掉即静默走整段转写。 */
+  diarization_enabled: boolean;
+}
+
+export const DEFAULT_NOTE_SETTINGS: NoteSettings = {
+  diarization_enabled: true,
+};
 
 /** 内置摘要提示词，由后端提供，前端不另存一份。 */
 export interface NoteSummaryPromptDefaults {
@@ -319,6 +331,48 @@ export interface PersistentHistoryRecord {
   totalMs?: number | null;
   error?: string | null;
   reprocessedFromId?: number | null;
+}
+
+/**
+ * 没做说话人分离的原因码，与后端 `DiarizationSkip::code()` 一一对应。
+ *
+ * 前端按它决定提示哪句话，所以不要用错误文案去匹配——文案会改，码不会。
+ */
+export type DiarizationFallbackReason =
+  | "disabled"
+  | "online_engine"
+  | "no_audio_file"
+  | "too_long"
+  | "models_missing"
+  | "audio_too_short"
+  | "unsupported_sample_rate"
+  | "failed";
+
+/**
+ * 说话人分离的一段转写，对应后端 `commands::audio_import::ImportedSpeakerSegment`。
+ *
+ * `speakerId` 是**本次转写内**的聚类编号（0 起），跨历史没有可比性。
+ */
+export interface HistorySpeakerSegment {
+  speakerId: number;
+  startMs: number;
+  endMs: number;
+  text: string;
+  overlap: boolean;
+}
+
+/**
+ * 导入转写的结果，对应后端 `commands::audio_import::ImportedTranscription`。
+ *
+ * 分段单独返回而不是挂在 `PersistentHistoryRecord` 上：历史列表一次查几十条，
+ * 每条都附带几百段会把列表接口拖垮，而列表也根本不渲染分段。
+ */
+export interface ImportedTranscription {
+  record: PersistentHistoryRecord;
+  /** 按时间排好序；空表示这次没有分离。 */
+  segments: HistorySpeakerSegment[];
+  /** 没做分离的原因；null 表示真的分离了。 */
+  fallbackReason: DiarizationFallbackReason | null;
 }
 
 /**

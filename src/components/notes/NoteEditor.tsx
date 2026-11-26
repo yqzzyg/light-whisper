@@ -21,6 +21,7 @@ import {
 import { copyToClipboard, getNoteRecordingAudioUrl, saveTextFile } from "@/api/tauri";
 import MarkdownContent from "@/components/MarkdownContent";
 import MarkdownEditor from "@/components/notes/MarkdownEditor";
+import SpeakerTranscript from "@/components/notes/SpeakerTranscript";
 import { formatDuration } from "@/lib/duration";
 import type { NoteTranscriptionState } from "@/hooks/noteTranscriptionStore";
 import {
@@ -35,6 +36,7 @@ import type {
   NotePatch,
   NoteRecording,
   NoteRecordingSnapshot,
+  NoteSpeakerSegment,
 } from "@/types/notes";
 
 type Tab = "content" | "transcript" | "summary";
@@ -100,6 +102,8 @@ export interface NoteEditorProps {
   recording: NoteRecordingSnapshot;
   /** 这条笔记的所有录音段。 */
   recordings: NoteRecording[];
+  /** 说话人分段，跨录音段拍平；空数组表示这次没做分离，退回整段正文。 */
+  speakerSegments: NoteSpeakerSegment[];
   /** 转写状态：跨页面保留，切回来仍在跑。 */
   transcription: NoteTranscriptionState;
   onStartRecording: () => void;
@@ -124,6 +128,7 @@ export default function NoteEditor({
   untitled,
   recording,
   recordings,
+  speakerSegments,
   transcription,
   onStartRecording,
   onTranscribe,
@@ -580,9 +585,13 @@ export default function NoteEditor({
             </div>
           )}
           {transcript.trim() ? (
-            <div className="notes-panel-scroll">
-              <p className="notes-transcript-text">{transcript}</p>
-            </div>
+            speakerSegments.length > 0 ? (
+              <SpeakerTranscript segments={speakerSegments} recordings={recordings} />
+            ) : (
+              <div className="notes-panel-scroll">
+                <p className="notes-transcript-text">{transcript}</p>
+              </div>
+            )
           ) : (
             <div className="notes-panel-empty">
               <FileText size={22} strokeWidth={1.5} />

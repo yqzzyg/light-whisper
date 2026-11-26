@@ -192,6 +192,37 @@ pub struct UserProfile {
     /// None = 用内置默认（`note_summary_service::DEFAULT_PART_PROMPT`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_summary_part_prompt: Option<String>,
+    /// 笔记相关开关。
+    #[serde(default)]
+    pub note_settings: NoteSettings,
+}
+
+/// 本地转写的说话人分离开关。
+///
+/// 名字沿用 `note_settings`（早先是给笔记转写加的），但**作用于所有本地转写**：
+/// 笔记录音转写与「上传音频」导入共用同一个开关，因为它们走的是同一条
+/// `transcription_service::transcribe_with_speakers`。不改成 `diarization_*`
+/// 是为了不动已发出的 profile JSON 字段名。
+///
+/// 单独放一个结构体而不是给 `UserProfile` 加裸字段：`UserProfile` 的 `Default`
+/// 是 derive 出来的，裸 `bool` 只能默认 `false`；而这里必须默认开。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteSettings {
+    /// 本地转写时自动做说话人分离。关掉即静默走整段转写，不提示。
+    #[serde(default = "default_true")]
+    pub diarization_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NoteSettings {
+    fn default() -> Self {
+        Self {
+            diarization_enabled: true,
+        }
+    }
 }
 
 fn default_history_enabled() -> bool {

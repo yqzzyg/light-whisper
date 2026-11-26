@@ -8,15 +8,18 @@
 //!   重复点不会重跑 ASR、也不会多一条历史。显式 `force`（重新转写）才覆盖。
 //! - **一次一条**：`AppState::note_transcription` 挡住连点造成的并发转写。
 //! - **失败不落历史**：转写失败的段不写历史；之前成功的段保留，重试只补没转的。
+//! - **说话人分离是旁路**：走 `transcribe_with_speakers`，分离不可用时它内部
+//!   降级成整段转写，这里拿到的就是「零分段」——本命令不做 `match`。
 
 use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::Emitter;
 
-use crate::services::funasr_service::TranscriptionResult;
 use crate::services::transcription_events::Preview;
-use crate::services::transcription_service::{self, AudioInput, TranscribeOptions};
+use crate::services::transcription_service::{
+    self, AudioInput, SpeakerTranscription, TranscribeOptions,
+};
 use crate::services::{history_service, notes_service};
 use crate::state::AppState;
 use crate::utils::{paths, AppError};
@@ -106,32 +109,44 @@ impl TranscribeRun<'_> {
         }
 
         let asr_started = Instant::now();
-        let result = self.run_asr(&path, recording, error_prefix).await?;
+        let outcome = self.run_asr(&path, recording, error_prefix).await?;
         let asr_ms = Some(elapsed_ms(asr_started));
 
-        let text = result.text.trim().to_string();
+        let text = outcome.result.text.trim().to_string();
         if text.is_empty() {
             return Err(AppError::Asr(format!(
                 "{error_prefix}：这段录音没有识别出文字，请确认录音里有声音后重试"
             )));
+        }
+        if let Some(skip) = outcome.fallback_reason {
+            log::info!("笔记第 {} 段未做说话人分离：{}", recording.id, skip.code());
+        } else {
+            // 分离统计只落日志：它是排查用（几人、语音占比），界面上有分段就够。
+            log::info!(
+                "笔记第 {} 段分离出 {} 段，统计 {:?}",
+                recording.id,
+                outcome.segments.len(),
+                outcome.diarization
+            );
         }
 
         let draft = history_draft_for_note(
             session_id,
             &text,
             recording.duration_sec,
-            result.language,
+            outcome.result.language,
             self.engine.clone(),
             asr_ms,
             Some(elapsed_ms(self.started)),
         );
-        // 历史行与该段转录在同一个事务里落库：笔记被删时历史一起回滚，不会留下
-        // 没人认领的记录；重新转写则就地更新原来的历史行。
-        let history_id = notes_service::save_recording_transcription(
+        // 历史行、该段转录、说话人分段在同一个事务里落库：笔记被删时历史一起回滚，
+        // 不会留下没人认领的记录；重新转写则就地更新原来的历史行并整段替换分段。
+        let history_id = notes_service::save_recording_transcription_with_segments(
             recording.id,
             draft,
             reuse_history,
             self.retention_days,
+            outcome.segments,
         )
         .await
         .map_err(|error| AppError::Asr(format!("{error_prefix}：{error}")))?;
@@ -141,17 +156,18 @@ impl TranscribeRun<'_> {
         Ok(())
     }
 
-    /// 一次 ASR 调用。
+    /// 一次 ASR 调用，带说话人分离。
     ///
-    /// 超过两小时的录音由统一入口自动切片，其余整段路径直传——本命令不再判断，
-    /// 只把手里的时长与「要发梯度进度」告诉 `transcription_service`。
+    /// 分离的所有取舍都在 `transcription_service` 里：这里只负责把时长与进度目标
+    /// 告诉它，拿回「文本 + 分段（可能为空）+ 降级原因（可能为 None）」。
+    /// 超过两小时的录音、没装模型、在线引擎都会在那里降级，本层不判断。
     async fn run_asr(
         &self,
         path: &Path,
         recording: &notes_service::NoteRecording,
         error_prefix: &str,
-    ) -> Result<TranscriptionResult, AppError> {
-        transcription_service::transcribe(
+    ) -> Result<SpeakerTranscription, AppError> {
+        transcription_service::transcribe_with_speakers(
             self.app,
             self.state,
             AudioInput::File(path),
@@ -287,6 +303,48 @@ pub async fn transcribe_note_recording_segment(
         .await
         .map_err(AppError::Asr)?
         .ok_or_else(|| AppError::Asr("转写完成，但这篇笔记已被删除".into()))
+}
+
+/// 一条笔记里的说话人分段，带着「属于哪段录音」。
+///
+/// 前端要按录音分组渲染（用户能看到每一段录音各自的对话），所以这里不把多段录音
+/// 的分段混成一个时间轴——各段录音的时间都是「从 0 开始」的，混起来会重叠。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteSpeakerSegment {
+    pub recording_id: i64,
+    pub speaker_id: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    pub overlap: bool,
+}
+
+/// 读一条笔记所有录音的说话人分段。
+///
+/// 按录音创建顺序 + 段内时间排序。返回空表就是「这次没有分离」：可能是功能关了、
+/// 引擎是在线的、录音太长、模型没装，或者分离那一步失败降级了——这些都是正常
+/// 状态，不是错误，所以这里不返回 `Result::Err` 去逼前端弹错误框。
+#[tauri::command]
+pub async fn list_note_speaker_segments(note_id: i64) -> Result<Vec<NoteSpeakerSegment>, AppError> {
+    let recordings = notes_service::list_note_recordings(note_id)
+        .await
+        .map_err(AppError::Asr)?;
+    let mut all = Vec::new();
+    for recording in recordings {
+        let segments = notes_service::list_recording_segments(recording.id)
+            .await
+            .map_err(AppError::Asr)?;
+        all.extend(segments.into_iter().map(|segment| NoteSpeakerSegment {
+            recording_id: recording.id,
+            speaker_id: segment.speaker_id,
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            text: segment.text,
+            overlap: segment.overlap,
+        }));
+    }
+    Ok(all)
 }
 
 #[cfg(test)]

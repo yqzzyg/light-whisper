@@ -1,8 +1,14 @@
 import { useRef, useCallback, useEffect, useLayoutEffect, useState, type UIEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Copy, Check, ChevronDown, ChevronUp } from "lucide-react";
+import SpeakerSegments from "@/components/SpeakerSegments";
 import { formatLatencySeconds } from "@/lib/duration";
-import type { EditGrabStatus, TranscriptionTiming } from "@/types";
+import type {
+  DiarizationFallbackReason,
+  EditGrabStatus,
+  HistorySpeakerSegment,
+  TranscriptionTiming,
+} from "@/types";
 
 interface TranscriptionResultProps {
   text: string | null;
@@ -17,6 +23,12 @@ interface TranscriptionResultProps {
   detectedLanguage?: string | null;
   editGrabStatus?: EditGrabStatus | null;
   timing?: TranscriptionTiming | null;
+  /**
+   * 说话人分段。空表或不传就是「这次没分离」，卡片只显示正文，不显示视图切换。
+   */
+  segments?: HistorySpeakerSegment[];
+  /** 没做分离的原因；有值时在卡片底部补一句为什么没有说话人。 */
+  fallbackReason?: DiarizationFallbackReason | null;
 }
 
 export default function TranscriptionResult({
@@ -32,6 +44,8 @@ export default function TranscriptionResult({
   detectedLanguage,
   editGrabStatus,
   timing,
+  segments,
+  fallbackReason,
 }: TranscriptionResultProps) {
   const { t } = useTranslation();
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -39,11 +53,19 @@ export default function TranscriptionResult({
   const [expanded, setExpanded] = useState(false);
   const [isOverflowing, setIsOverflowing] = useState(false);
   const [reachedBodyEnd, setReachedBodyEnd] = useState(false);
+  const hasSpeakers = (segments?.length ?? 0) > 0;
+  // 默认给说话人视图：用户做分离就是为了看这个。没有分段时恒为正文。
+  const [view, setView] = useState<"speaker" | "text">(hasSpeakers ? "speaker" : "text");
   const hasResult = text !== null;
   const hasStats = !!text && durationSec && durationSec > 0 && charCount;
   const editGrabHintKey =
     editGrabStatus === "timeout" || editGrabStatus === "empty"
       ? `result.editGrab.${editGrabStatus}`
+      : null;
+  // `disabled` 是用户自己关的，不用再解释一遍；其余原因都值得说明。
+  const fallbackHintKey =
+    fallbackReason && fallbackReason !== "disabled"
+      ? `result.diarizationFallback.${fallbackReason}`
       : null;
   const latencyParts = [
     { key: "result.latency.asr", ms: timing?.asrMs },
@@ -60,6 +82,12 @@ export default function TranscriptionResult({
   useEffect(() => {
     setDraftText(text ?? "");
   }, [text]);
+
+  // 重新转写后分段可能消失（降级、换了引擎、或关掉了开关），那就没有「说话人」
+  // 可看，必须切回正文，否则会停在一个空白视图上。
+  useEffect(() => {
+    if (!hasSpeakers) setView("text");
+  }, [hasSpeakers]);
 
   const handleChange = useCallback((newText: string) => {
     setDraftText(newText);
@@ -124,9 +152,22 @@ export default function TranscriptionResult({
   }, [draftText, originalText, onTextChange]);
 
   const handleCopy = useCallback(() => {
+    // 说话人视图复制「说话人 N：文本」的整段，与历史里存的正文一致；
+    // 正文视图复制用户当前编辑的内容（可能是手改过的草稿）。
+    if (view === "speaker" && hasSpeakers) {
+      const spoken = (segments ?? [])
+        .filter((segment) => segment.text.trim())
+        .map(
+          (segment) =>
+            `${t("notes.speaker", { index: segment.speakerId + 1 })}：${segment.text.trim()}`,
+        )
+        .join("\n");
+      onCopy(spoken, "original");
+      return;
+    }
     const currentText = bodyRef.current?.value.trim() ?? draftText.trim() ?? text ?? "";
     onCopy(currentText, "original");
-  }, [draftText, text, onCopy]);
+  }, [view, hasSpeakers, segments, t, draftText, text, onCopy]);
 
   return (
     <>
@@ -139,7 +180,29 @@ export default function TranscriptionResult({
                 {t("result.title")}
               </span>
               <div className="result-card-header-actions">
-                {expanded && (
+                {hasSpeakers && (
+                  // 只有存在分段时才给切换：没分段时两个视图内容完全一样，
+                  // 多一个按钮只会让人以为点坏了。
+                  <div className="result-view-switch" role="group">
+                    <button
+                      type="button"
+                      className="result-view-btn"
+                      aria-pressed={view === "speaker"}
+                      onClick={() => setView("speaker")}
+                    >
+                      {t("result.speakerView")}
+                    </button>
+                    <button
+                      type="button"
+                      className="result-view-btn"
+                      aria-pressed={view === "text"}
+                      onClick={() => setView("text")}
+                    >
+                      {t("result.textView")}
+                    </button>
+                  </div>
+                )}
+                {expanded && view === "text" && (
                   <button
                     type="button"
                     className="result-header-toggle"
@@ -164,34 +227,42 @@ export default function TranscriptionResult({
                 <span className="skeleton-shimmer result-processing-line" />
               </div>
             )}
-            <div className="result-body-wrap">
-              <textarea
-                ref={bodyRef}
-                className={`result-card-body${expanded ? " result-card-body-expanded" : ""}`}
-                aria-label={t("result.editableTranscription")}
-                value={draftText}
-                rows={Math.max(3, draftText.split(/\r?\n/).length)}
-                onChange={(event) => handleChange(event.target.value)}
-                onBlur={handleBlur}
-                onScroll={handleBodyScroll}
-                spellCheck={false}
-              />
-              {!expanded && isOverflowing && !reachedBodyEnd && (
-                <span className="result-body-fade" aria-hidden="true" />
-              )}
-            </div>
-            {!expanded && isOverflowing && (
-              <div className="result-body-actions">
-                <button
-                  type="button"
-                  className="result-body-toggle"
-                  onClick={handleToggleExpanded}
-                  aria-expanded="false"
-                >
-                  <ChevronDown size={12} aria-hidden="true" />
-                  <span>{t("result.expandAll")}</span>
-                </button>
+            {view === "speaker" && hasSpeakers ? (
+              <div className="result-speaker-body">
+                <SpeakerSegments segments={segments ?? []} />
               </div>
+            ) : (
+              <>
+                <div className="result-body-wrap">
+                  <textarea
+                    ref={bodyRef}
+                    className={`result-card-body${expanded ? " result-card-body-expanded" : ""}`}
+                    aria-label={t("result.editableTranscription")}
+                    value={draftText}
+                    rows={Math.max(3, draftText.split(/\r?\n/).length)}
+                    onChange={(event) => handleChange(event.target.value)}
+                    onBlur={handleBlur}
+                    onScroll={handleBodyScroll}
+                    spellCheck={false}
+                  />
+                  {!expanded && isOverflowing && !reachedBodyEnd && (
+                    <span className="result-body-fade" aria-hidden="true" />
+                  )}
+                </div>
+                {!expanded && isOverflowing && (
+                  <div className="result-body-actions">
+                    <button
+                      type="button"
+                      className="result-body-toggle"
+                      onClick={handleToggleExpanded}
+                      aria-expanded="false"
+                    >
+                      <ChevronDown size={12} aria-hidden="true" />
+                      <span>{t("result.expandAll")}</span>
+                    </button>
+                  </div>
+                )}
+              </>
             )}
             {showMeta && (
               <p className="result-card-stats">
@@ -206,6 +277,10 @@ export default function TranscriptionResult({
                   <span className="result-edit-grab-hint">{t(editGrabHintKey)}</span>
                 )}
               </p>
+            )}
+            {fallbackHintKey && (
+              // 降级不是错误：转写成功了，只是没有分段。所以用提示行而不是报错。
+              <p className="result-speaker-fallback">{t(fallbackHintKey)}</p>
             )}
           </div>
         </div>

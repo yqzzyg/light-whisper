@@ -54,12 +54,27 @@ export interface NoteRecording {
   createdAt: number;
 }
 
+/**
+ * 一段录音里的一个说话人片段。
+ *
+ * `recordingId` 必须保留：同一篇笔记的多段录音各自从 0 开始计时，混成一个时间轴
+ * 会重叠。`overlap` 表示这段里两个人同时说话，界面只用它加个提示。
+ */
+export interface NoteSpeakerSegment {
+  recordingId: number;
+  /** 从 0 开始的说话人序号，同一段录音内一致；不同录音之间没有关系。 */
+  speakerId: number;
+  startMs: number;
+  endMs: number;
+  text: string;
+  overlap: boolean;
+}
+
 export interface NotePage {
   items: NoteListItem[];
   total: number;
   hasMore: boolean;
 }
-
 export interface NoteQuery {
   folderId?: number | null;
   /** 只看「未分类」；与 folderId 同时给出时以本项为准。 */

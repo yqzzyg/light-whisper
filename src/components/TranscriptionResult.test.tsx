@@ -152,4 +152,100 @@ describe("TranscriptionResult", () => {
     fireEvent.blur(result);
     expect(onTextChange).toHaveBeenCalledWith("corrected text");
   });
+
+  it("opens on the speaker view when segments exist and copies them with labels", () => {
+    const onCopy = vi.fn();
+    render(
+      <TranscriptionResult
+        text={"说话人 1：你好\n说话人 2：在的"}
+        originalText={null}
+        isProcessing={false}
+        copiedId={null}
+        onCopy={onCopy}
+        durationSec={10}
+        charCount={12}
+        segments={[
+          { speakerId: 0, startMs: 0, endMs: 2000, text: "你好", overlap: false },
+          { speakerId: 1, startMs: 2000, endMs: 4000, text: "在的", overlap: true },
+        ]}
+      />,
+    );
+
+    // 默认落在说话人视图：没有 textarea，只有分段列表。
+    expect(screen.queryByLabelText("result.editableTranscription")).not.toBeInTheDocument();
+    expect(screen.getAllByText("notes.speaker")).toHaveLength(2);
+
+    fireEvent.click(screen.getByLabelText("common.copy"));
+    expect(onCopy).toHaveBeenCalledWith(
+      "notes.speaker：你好\nnotes.speaker：在的",
+      "original",
+    );
+  });
+
+  it("switches back to the editable text view on demand", () => {
+    render(
+      <TranscriptionResult
+        text={"说话人 1：你好"}
+        originalText={null}
+        isProcessing={false}
+        copiedId={null}
+        onCopy={vi.fn()}
+        durationSec={10}
+        charCount={6}
+        segments={[{ speakerId: 0, startMs: 0, endMs: 2000, text: "你好", overlap: false }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("result.textView"));
+    expect(screen.getByLabelText("result.editableTranscription")).toHaveValue("说话人 1：你好");
+  });
+
+  it("hides the view switch when there are no segments", () => {
+    render(
+      <TranscriptionResult
+        text="hello"
+        originalText="hello"
+        isProcessing={false}
+        copiedId={null}
+        onCopy={vi.fn()}
+        durationSec={1}
+        charCount={5}
+        segments={[]}
+      />,
+    );
+
+    expect(screen.queryByText("result.speakerView")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("result.editableTranscription")).toBeInTheDocument();
+  });
+
+  it("explains why speakers were not separated", () => {
+    const { rerender } = render(
+      <TranscriptionResult
+        text="hello"
+        originalText="hello"
+        isProcessing={false}
+        copiedId={null}
+        onCopy={vi.fn()}
+        durationSec={1}
+        charCount={5}
+        fallbackReason="models_missing"
+      />,
+    );
+    expect(screen.getByText("result.diarizationFallback.models_missing")).toBeInTheDocument();
+
+    // 用户自己关掉的开关不必再解释一遍。
+    rerender(
+      <TranscriptionResult
+        text="hello"
+        originalText="hello"
+        isProcessing={false}
+        copiedId={null}
+        onCopy={vi.fn()}
+        durationSec={1}
+        charCount={5}
+        fallbackReason="disabled"
+      />,
+    );
+    expect(screen.queryByText("result.diarizationFallback.disabled")).not.toBeInTheDocument();
+  });
 });

@@ -225,6 +225,7 @@ export default function NotesPage({
             untitled={untitled}
             recording={recording}
             recordings={state.recordings}
+            speakerSegments={state.speakerSegments}
             transcription={transcription}
             onStartRecording={() => void handleStartRecording()}
             onTranscribe={() => void handleTranscribe()}

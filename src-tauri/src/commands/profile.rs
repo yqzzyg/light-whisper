@@ -259,6 +259,22 @@ pub async fn set_history_settings(
     Ok(())
 }
 
+/// 开关笔记转写时的说话人分离。
+///
+/// 只动这一个字段：前端不需要把整个 profile 传回来（那会顺带覆盖别的设置）。
+/// 关掉之后下一次转写就走整段路径，已经存下的分段仍然保留——用户关的是一个
+/// 「以后要不要做」的开关，不是「删掉历史结果」。
+#[tauri::command]
+pub async fn set_note_diarization_enabled(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    profile_service::update_profile_and_schedule(state.inner(), |profile| {
+        profile.note_settings.diarization_enabled = enabled;
+    });
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_app_profile_rules(
     state: tauri::State<'_, AppState>,

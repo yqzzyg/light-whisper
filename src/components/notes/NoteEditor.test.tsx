@@ -109,6 +109,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NoteEditor>> = {})
       error: null,
     },
     recordings: [],
+    speakerSegments: [],
     transcription: {
       noteId: null,
       recordingId: null,

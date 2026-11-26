@@ -45,6 +45,38 @@ class FakeVad:
         return self.chunks
 
 
+class FakeDiarizeSegment:
+    def __init__(self, speaker_id, start, end):
+        self.speaker_id = speaker_id
+        self.start = start
+        self.end = end
+        self.overlap = False
+
+    @property
+    def duration(self):
+        return self.end - self.start
+
+
+class FakeDiarizeResult:
+    def __init__(self, segments):
+        self.segments = segments
+        self.speaker_count = len({segment.speaker_id for segment in segments})
+        self.duration = max((segment.end for segment in segments), default=0.0)
+        self.stats = {}
+
+
+class UnloadingDiarizer:
+    """分离跑完就把运行时卸掉：复现空闲看门狗在分离期间到点的场景。"""
+
+    def __init__(self, server, segments):
+        self.server = server
+        self.segments = segments
+
+    def run(self, audio_path, progress=None):
+        self.server._suspend_gpu_runtime()
+        return FakeDiarizeResult(self.segments)
+
+
 class Qwen3ASRServerTests(unittest.TestCase):
     def setUp(self):
         FakeNativeRuntime.instances.clear()
@@ -312,6 +344,55 @@ class Qwen3ASRServerTests(unittest.TestCase):
             result = server.transcribe_audio("clip.wav")
         initialize.assert_called_once()
         self.assertEqual(result["error"], "reload")
+
+    def test_diarized_transcription_reloads_runtime_unloaded_during_diarization(self):
+        # 回归：分离期间运行时被空闲卸载时，逐段识别不能打到已释放的句柄上。
+        import tempfile
+
+        import soundfile as sf
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = os.path.join(directory, "meeting.wav")
+            sf.write(audio_path, np.zeros(16_000 * 31, dtype=np.float32), 16_000)
+            with (
+                mock.patch.object(
+                    qwen3_asr_server.Qwen3ASRServer,
+                    "_detect_device",
+                    return_value="cuda",
+                ),
+                mock.patch.object(
+                    qwen3_asr_server.Qwen3ASRServer,
+                    "_resolve_model_path",
+                    return_value="qwen3-asr-0.6b-q8_0.gguf",
+                ),
+                mock.patch.object(qwen3_asr_server.Qwen3ASRServer, "_warmup_inference"),
+                mock.patch.object(
+                    qwen3_asr_server, "FireRedVad", side_effect=lambda: FakeVad([])
+                ),
+            ):
+                server = qwen3_asr_server.Qwen3ASRServer(engine="qwen3-asr-0.6b")
+                self.assertTrue(server.initialize()["success"])
+                unloaded = server.session
+                segments = [
+                    FakeDiarizeSegment(0, 0.0, 1.0),
+                    FakeDiarizeSegment(1, 1.0, 2.0),
+                ]
+                with mock.patch.object(
+                    server,
+                    "_diarizer",
+                    return_value=UnloadingDiarizer(server, segments),
+                ):
+                    result = server.transcribe_diarized(audio_path)
+
+                self.assertTrue(result["success"], result)
+                self.assertEqual(
+                    [item["speaker_id"] for item in result["segments"]], [0, 1]
+                )
+                self.assertEqual(result["text"], "说话人 1：测试文本\n说话人 2：测试文本")
+                self.assertTrue(server.initialized)
+                self.assertIsNot(server.session, unloaded)
+                self.assertEqual(len(FakeNativeRuntime.instances), 2)
+                unloaded.close.assert_called_once()
 
 
 if __name__ == "__main__":

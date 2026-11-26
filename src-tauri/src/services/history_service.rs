@@ -38,6 +38,25 @@ pub struct HistoryDraft {
     pub reprocessed_from_id: Option<i64>,
 }
 
+/// 说话人分离产出的一段转写。
+///
+/// 字段**保持 snake_case**：Python 侧返回的就是 `speaker_id` / `start_ms`，
+/// 直接反序列化进来。给前端的展示结构（camelCase）在各命令层各自定义，
+/// 不要在这里加 `rename_all`——那会让 IPC 解析悄悄失败并退化成整段转写。
+///
+/// `speaker_id` 是**本次转写内**的聚类编号（0 起），跨录音、跨历史都没有可比性；
+/// `overlap` 为真表示这段里有多人同时说话，文字归属给了主导者。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeakerSegment {
+    pub speaker_id: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub overlap: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRecord {
@@ -194,6 +213,23 @@ pub(crate) fn ensure_schema(connection: &Connection) -> Result<(), String> {
                 lease_count INTEGER NOT NULL CHECK (lease_count > 0),
                 updated_at INTEGER NOT NULL
             );
+            -- 说话人分离的分段结果，挂在历史行上（导入音频的历史没有笔记可挂）。
+            -- `speaker_id` 是「本次转写内」的聚类编号，跨历史不可比；
+            -- 笔记侧那张 `note_recording_segments` 语义相同，但外键指向录音段，
+            -- 两者的生命周期不同（历史会被保留期淘汰），所以不做成一张表。
+            CREATE TABLE IF NOT EXISTS history_segments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                history_id INTEGER NOT NULL REFERENCES transcription_history(id) ON DELETE CASCADE,
+                speaker_id INTEGER NOT NULL DEFAULT 0,
+                start_ms   INTEGER NOT NULL,
+                end_ms     INTEGER NOT NULL,
+                text       TEXT    NOT NULL DEFAULT '',
+                overlap    INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_segments
+                ON history_segments(history_id, sort_order);
             "#,
             )
             .map_err(|error| format!("初始化历史数据库失败: {error}"))
@@ -364,6 +400,129 @@ pub async fn insert(draft: HistoryDraft, retention_days: u32) -> Result<i64, Str
     })
     .await
     .map_err(|error| format!("写入转写历史任务失败: {error}"))?
+}
+
+/// 写入一条历史，并在同一个事务里写入说话人分段。
+///
+/// 分段与历史行必须同事务。分成两次写的话，中间崩溃会留下「看起来转过、却没有
+/// 任何分段」的记录：前端只能当成没分离过，而用户刚刚明明看着分离跑完。
+/// `segments` 为空正好表达「这次没有分离」，不需要另一个入口。
+pub async fn insert_with_segments(
+    draft: HistoryDraft,
+    segments: Vec<SpeakerSegment>,
+    retention_days: u32,
+) -> Result<i64, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let mut connection = db::open()?;
+        let history_id = insert_and_segments_with_connection(&mut connection, &draft, &segments)?;
+        if let Err(error) = cleanup_expired_with_connection(&mut connection, retention_days) {
+            log::warn!("历史记录已保存，但自动清理失败，将在下次启动重试: {error}");
+        }
+        Ok(history_id)
+    })
+    .await
+    .map_err(|error| format!("写入转写历史任务失败: {error}"))?
+}
+
+fn insert_and_segments_with_connection(
+    connection: &mut Connection,
+    draft: &HistoryDraft,
+    segments: &[SpeakerSegment],
+) -> Result<i64, String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("开始历史落库事务失败: {error}"))?;
+    let history_id = insert_with_connection(&transaction, draft)?;
+    replace_segments_with_connection(&transaction, history_id, segments)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交历史落库事务失败: {error}"))?;
+    Ok(history_id)
+}
+
+fn replace_segments_with_connection(
+    connection: &Connection,
+    history_id: i64,
+    segments: &[SpeakerSegment],
+) -> Result<(), String> {
+    // 同一条历史重新转写时会再走一遍，先清旧段才不会越转越多。
+    connection
+        .execute(
+            "DELETE FROM history_segments WHERE history_id = ?1",
+            [history_id],
+        )
+        .map_err(|error| format!("清理旧的历史分段失败: {error}"))?;
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let created_at = now_millis();
+    let mut statement = connection
+        .prepare(
+            "INSERT INTO history_segments
+                (history_id, speaker_id, start_ms, end_ms, text, overlap, sort_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .map_err(|error| format!("准备写入历史分段失败: {error}"))?;
+    for (index, segment) in segments.iter().enumerate() {
+        statement
+            .execute(params![
+                history_id,
+                segment.speaker_id,
+                segment.start_ms,
+                segment.end_ms,
+                segment.text,
+                if segment.overlap { 1i64 } else { 0i64 },
+                index as i64,
+                created_at,
+            ])
+            .map_err(|error| format!("写入历史分段失败: {error}"))?;
+    }
+    Ok(())
+}
+
+/// 读一条历史的分段，按写入顺序（`sort_order`）返回。
+///
+/// 返回空表就是「这次没有分离」，不是错误：功能被关掉、引擎在线、录音太长、
+/// 模型没装、或者分离那一步降级了，都是正常状态，调用方不该弹错误框。
+pub async fn list_segments(history_id: i64) -> Result<Vec<SpeakerSegment>, String> {
+    initialize().await?;
+    tokio::task::spawn_blocking(move || {
+        let connection = db::open()?;
+        list_segments_with_connection(&connection, history_id)
+    })
+    .await
+    .map_err(|error| format!("读取历史分段任务失败: {error}"))?
+}
+
+fn list_segments_with_connection(
+    connection: &Connection,
+    history_id: i64,
+) -> Result<Vec<SpeakerSegment>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT speaker_id, start_ms, end_ms, text, overlap
+               FROM history_segments
+              WHERE history_id = ?1
+              ORDER BY sort_order, id",
+        )
+        .map_err(|error| format!("准备读取历史分段失败: {error}"))?;
+    let rows = statement
+        .query_map([history_id], |row| {
+            Ok(SpeakerSegment {
+                speaker_id: row.get(0)?,
+                start_ms: row.get(1)?,
+                end_ms: row.get(2)?,
+                text: row.get(3)?,
+                overlap: row.get::<_, i64>(4)? != 0,
+            })
+        })
+        .map_err(|error| format!("读取历史分段失败: {error}"))?;
+    let mut segments = Vec::new();
+    for row in rows {
+        segments.push(row.map_err(|error| format!("解析历史分段失败: {error}"))?);
+    }
+    Ok(segments)
 }
 
 /// 写入一条历史，连接与事务边界由调用方决定。
@@ -966,8 +1125,9 @@ mod tests {
 
     use super::{
         cleanup_expired_with_connection, configure_connection, get_for_reprocess_with_connection,
-        latency_stats, map_stored_record, now_millis, release_audio_lease_with_connection,
-        safe_audio_path, HISTORY_COLUMNS,
+        insert_and_segments_with_connection, latency_stats, list_segments_with_connection,
+        map_stored_record, now_millis, release_audio_lease_with_connection, safe_audio_path,
+        HistoryDraft, SpeakerSegment, HISTORY_COLUMNS,
     };
 
     include!("history_stats_tests.rs");
@@ -1014,6 +1174,172 @@ mod tests {
         assert!(safe_audio_path("../secret.wav").is_none());
         assert!(safe_audio_path("folder/voice.wav").is_none());
         assert!(safe_audio_path("voice.wav").is_some());
+    }
+
+    fn segment_draft(text: &str) -> HistoryDraft {
+        HistoryDraft {
+            session_id: 1,
+            mode: "import".into(),
+            workflow: "import".into(),
+            status: "success".into(),
+            text: text.into(),
+            original_text: text.into(),
+            source_text: None,
+            duration_sec: Some(60.0),
+            language: Some("zh".into()),
+            engine: "qwen3-asr-0.6b".into(),
+            provider: None,
+            model: None,
+            app_process: None,
+            app_window_title: None,
+            app_rule_name: None,
+            audio_file: None,
+            asr_ms: Some(100),
+            polish_ms: None,
+            total_ms: Some(120),
+            error: None,
+            reprocessed_from_id: None,
+        }
+    }
+
+    fn sample_segments() -> Vec<SpeakerSegment> {
+        vec![
+            SpeakerSegment {
+                speaker_id: 0,
+                start_ms: 0,
+                end_ms: 2_500,
+                text: "第一句".into(),
+                overlap: false,
+            },
+            SpeakerSegment {
+                speaker_id: 1,
+                start_ms: 2_500,
+                end_ms: 5_000,
+                text: "第二句".into(),
+                overlap: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn segments_round_trip_in_insertion_order() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory history database");
+        configure_connection(&connection).expect("initialize history schema");
+
+        let history_id = insert_and_segments_with_connection(
+            &mut connection,
+            &segment_draft("说话人 1：第一句\n说话人 2：第二句"),
+            &sample_segments(),
+        )
+        .expect("insert history with segments");
+
+        let stored = list_segments_with_connection(&connection, history_id).expect("read segments");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].speaker_id, 0);
+        assert_eq!(stored[0].text, "第一句");
+        assert!(!stored[0].overlap);
+        assert_eq!(stored[1].speaker_id, 1);
+        // overlap 存的是整数 0/1，读回来必须变回 bool，不能被当成「非空即真」。
+        assert!(stored[1].overlap);
+    }
+
+    #[test]
+    fn empty_segments_are_a_valid_result_not_an_error() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory history database");
+        configure_connection(&connection).expect("initialize history schema");
+
+        // 降级（没分离）走的就是这条路径：历史要写进去，只是没有分段。
+        let history_id =
+            insert_and_segments_with_connection(&mut connection, &segment_draft("整段正文"), &[])
+                .expect("insert history without segments");
+
+        assert!(list_segments_with_connection(&connection, history_id)
+            .expect("read segments")
+            .is_empty());
+    }
+
+    #[test]
+    fn rewriting_segments_replaces_instead_of_appending() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory history database");
+        configure_connection(&connection).expect("initialize history schema");
+
+        let history_id = insert_and_segments_with_connection(
+            &mut connection,
+            &segment_draft("第一版"),
+            &sample_segments(),
+        )
+        .expect("insert history with segments");
+
+        // 重新转写：同一批分段再写一次，不应该翻倍。
+        insert_and_segments_with_connection(
+            &mut connection,
+            &segment_draft("第二版"),
+            &sample_segments(),
+        )
+        .expect("insert history again");
+
+        let stored = list_segments_with_connection(&connection, history_id).expect("read segments");
+        assert_eq!(stored.len(), 2, "segments must be replaced, not appended");
+    }
+
+    #[test]
+    fn segments_are_scoped_to_their_own_history() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory history database");
+        configure_connection(&connection).expect("initialize history schema");
+
+        let first = insert_and_segments_with_connection(
+            &mut connection,
+            &segment_draft("第一条"),
+            &sample_segments(),
+        )
+        .expect("insert first history");
+        let second = insert_and_segments_with_connection(
+            &mut connection,
+            &segment_draft("第二条"),
+            &sample_segments()[..1],
+        )
+        .expect("insert second history");
+
+        assert_eq!(
+            list_segments_with_connection(&connection, first)
+                .expect("read first")
+                .len(),
+            2
+        );
+        assert_eq!(
+            list_segments_with_connection(&connection, second)
+                .expect("read second")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn deleting_history_drops_its_segments() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory history database");
+        configure_connection(&connection).expect("initialize history schema");
+
+        let history_id = insert_and_segments_with_connection(
+            &mut connection,
+            &segment_draft("会被删掉"),
+            &sample_segments(),
+        )
+        .expect("insert history with segments");
+
+        connection
+            .execute(
+                "DELETE FROM transcription_history WHERE id = ?1",
+                [history_id],
+            )
+            .expect("delete history");
+
+        // 外键 ON DELETE CASCADE：保留期淘汰历史后，分段不能留成孤儿。
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM history_segments", [], |row| {
+                row.get(0)
+            })
+            .expect("count segments");
+        assert_eq!(remaining, 0);
     }
 
     #[test]
