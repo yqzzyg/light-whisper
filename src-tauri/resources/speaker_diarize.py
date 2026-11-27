@@ -17,16 +17,32 @@ They are **not** transferable from openwhispr: its 0.5 merge threshold would
 collapse two genuinely different speakers into one (measured: different people
 score 0.683 on centroid cosine, same person across 31 minutes scores 0.973).
 See docs/neo/speaker-diarization-plan.md section 9.6 before changing anything.
+
+These are not user settings — a number here has no meaning outside a given
+model and machine. Two internal channels exist instead:
+
+* `load_options_from_env` — JSON override via ``LIGHT_WHISPER_DIARIZE_OVERRIDES``,
+  for field tuning and regression runs without rebuilding the app.
+* `adapt_options` — derives the two *cost* knobs (segment ceiling, embedding
+  stride) from the ASR backend, VRAM and audio length, because those genuinely
+  differ per device while the accuracy knobs do not.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import os
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 
 SAMPLE_RATE = 16_000
+
+# 现场调参用的覆盖入口（见 `load_options_from_env`）。只给开发与回归用，
+# 不进用户配置、不参与打包默认值。
+DIARIZE_OVERRIDES_ENV = "LIGHT_WHISPER_DIARIZE_OVERRIDES"
 
 
 @dataclass(frozen=True)
@@ -47,6 +63,17 @@ class DiarizeOptions:
     collapse_other_mean_seconds: float = 2.2
     max_speakers: int = 8
     min_segment_seconds: float = 0.3
+    # 帧级补洞：同一簇内相邻活跃帧的空隙 ≤ 这个值就接上。它必须明显小于
+    # `adjacent_merge_gap_seconds`，否则段级合并又变成空阈值——1.0 的合并阈值
+    # 当初一次都没触发，就是被这里的 0.5 吃掉了大半区间。
+    frame_gap_seconds: float = 0.5
+    # 帧投票：一个簇在某一帧的平均得分到这里才算「这一帧是他在说」。
+    vote_threshold: float = 0.5
+    # 一段里超过这个比例的帧被判为重叠语音，界面上给这段加「重叠」标记。
+    overlap_frame_share: float = 0.5
+    # 嵌入只用「干净帧」：窗内同时活跃的本地说话人少于这个数才算干净。
+    # 重叠帧混着两个声音，嵌入向量谁都像、谁都不像。
+    embed_frame_max_local_speakers: int = 2
     # Frames of active speech required before a (window, speaker) pair is embedded.
     min_active_frames: int = 10
     # Embed every Nth window instead of all of them. Consecutive 10s windows
@@ -55,6 +82,14 @@ class DiarizeOptions:
     # segment boundaries come from the segmenter and are unaffected.
     # Measured: stride 1 -> 2404 embeddings / 386s per hour, stride 4 -> 611 /
     # 185s, with identical speaker shares (74.1% / 25.7%).
+    # HARD LIMIT: stride * window_shift must stay below window_samples. The
+    # shipped model has 10s windows shifted 2s -> coverage factor 5, so 4 is
+    # the largest safe stride. Stride 6 makes sampled windows 12s apart and
+    # leaves a 2s hole every 12s; `_vote` sees cover=0 there, never marks those
+    # frames active, and ASR silently drops words inside the hole (measured:
+    # 79.26-81.98 "第二，这是巩固和发展全" + 81.98-84.03 unsaid "党高度团结统一"
+    # on the 58-minute party-class recording). `_embed_windows` clamps this
+    # at runtime regardless of how the value was set.
     embed_window_stride: int = 4
     # Above this many embeddings, cluster on a sample then refine on all points.
     subsample_limit: int = 1200
@@ -78,8 +113,200 @@ class DiarizeOptions:
     # 45 vs 30 was measured end to end on the same 31-minute recording:
     # 45s -> 106 segments / 73.0s ASR, 30s -> 123 segments / 66.1s ASR.
     # 17 extra cards buy 7 seconds; 45 is the better trade.
+    # 45 是「4GB 卡上」的下界，不是通用最优：显存更大时 `adapt_options` 会放到
+    # 60，它只在没有设备信息时兜底。
     max_segment_seconds: float = 45.0
     audio_block_seconds: float = 30.0
+
+
+# ----------------------------------------------------------------------
+# 参数覆盖与设备自适应
+#
+# 这些数没有「用户想要的正确值」，只有「这套模型 + 这台机器上的正确值」。
+# 所以不对外暴露成设置项，只留两个内部通道：
+#   1. `load_options_from_env` —— 调参与回归时用环境变量临时改，不重编译；
+#   2. `adapt_options` —— 按后端/显存/时长推导两个成本参数（段长上限、
+#      嵌入步长），因为它们本来就该跟设备走。
+# ----------------------------------------------------------------------
+
+# 采样窗不留缝的最大步长。对当前分段模型（10s 窗 / 2s 移位）是 4；
+# 调用方拿到真实 segmenter 后会用 `max_safe_embed_stride` 覆盖这个值。
+DEFAULT_MAX_EMBED_WINDOW_STRIDE = 4
+
+
+def max_safe_embed_stride(window_samples: int, window_shift_samples: int) -> int:
+    """相邻采样窗之间不留洞的最大步长（留一窗余量）。
+
+    窗长 W、窗起点间隔 S 时，每 stride 个窗取一个会让采样窗起点相隔
+    ``stride * S``。一旦它达到 W，两次采样之间就出现没有任何采样窗覆盖的区间：
+    `_vote` 的 cover 在那里是 0，帧永远不 active，整段语音落不进任何 ASR 段，
+    界面上表现为「吞字」。倍数 5 时返回 4，而不是踩着边界的 5。
+    """
+    if window_samples <= 0 or window_shift_samples <= 0:
+        return 0  # 调用方拿不到模型元数据时不额外钳制
+    return max(1, int(window_samples // window_shift_samples) - 1)
+
+
+# key -> (类型, 下界, 上界)。范围不是随手圈的，每条都对应一种已知的坏结果：
+# 阈值越界不会报错，只会静默分错人，所以这里必须拦住。
+_OVERRIDE_BOUNDS: dict[str, tuple[str, float, float]] = {
+    # 低于 0.20 会把一个人拆成多个；高于 0.70 会把两个人并成一个。
+    "cluster_distance_cut": ("float", 0.20, 0.70),
+    # 低于异人实测值 0.683 就会吞掉真实第二人，低于 0.70 无意义。
+    "merge_centroid_cos": ("float", 0.70, 0.99),
+    "phantom_max_share": ("float", 0.0, 0.5),
+    "phantom_max_mean_seconds": ("float", 0.5, 30.0),
+    "isolated_cluster_max_seconds": ("float", 0.5, 60.0),
+    "collapse_max_share": ("float", 0.5, 1.0),
+    "collapse_other_mean_seconds": ("float", 0.5, 30.0),
+    "max_speakers": ("int", 1, 20),
+    "min_segment_seconds": ("float", 0.0, 5.0),
+    # 活跃帧不足这么多就不做嵌入：一帧 0.1s，10 帧约 1 秒。
+    "min_active_frames": ("int", 1, 200),
+    "frame_gap_seconds": ("float", 0.0, 2.0),
+    "vote_threshold": ("float", 0.1, 0.9),
+    "overlap_frame_share": ("float", 0.1, 1.0),
+    "embed_frame_max_local_speakers": ("int", 1, 4),
+    "embed_window_stride": ("int", 1, 16),
+    "subsample_limit": ("int", 100, 10000),
+    # 必须大于 frame_gap_seconds，否则段级合并不起作用（见字段注释）。
+    "adjacent_merge_gap_seconds": ("float", 0.0, 10.0),
+    "max_segment_seconds": ("float", 10.0, 115.0),
+    "audio_block_seconds": ("float", 5.0, 120.0),
+}
+
+
+def _coerce_override(key: str, raw: object) -> float | int:
+    if key not in _OVERRIDE_BOUNDS:
+        raise ValueError(
+            f"未知参数 {key!r}；可用参数：{', '.join(sorted(_OVERRIDE_BOUNDS))}"
+        )
+    kind, low, high = _OVERRIDE_BOUNDS[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{key} 需要数字，收到 {raw!r}")
+    if kind == "int":
+        if float(raw) != int(raw):
+            raise ValueError(f"{key} 需要整数，收到 {raw!r}")
+        value: float | int = int(raw)
+    else:
+        value = float(raw)
+    if not low <= value <= high:
+        raise ValueError(f"{key}={value} 超出范围 [{low}, {high}]")
+    return value
+
+
+def load_options_from_env(
+    base: DiarizeOptions | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[DiarizeOptions, frozenset[str]]:
+    """读 `LIGHT_WHISPER_DIARIZE_OVERRIDES`，返回 (生效参数, 被覆盖的键)。
+
+    值是 JSON 对象，例如 `{"adjacent_merge_gap_seconds": 1.5}`。格式错、键名错、
+    类型错、越界都抛 `ValueError`（调用方负责记日志并退回默认值）——静默忽略
+    会让人以为调了却没生效，比直接报错更难查。
+    """
+    base = base or DiarizeOptions()
+    env = os.environ if environ is None else environ
+    raw = env.get(DIARIZE_OVERRIDES_ENV)
+    if raw is None or not raw.strip():
+        return base, frozenset()
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{DIARIZE_OVERRIDES_ENV} 不是合法 JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{DIARIZE_OVERRIDES_ENV} 需要 JSON 对象，收到 {type(payload).__name__}")
+
+    updates = {key: _coerce_override(key, value) for key, value in payload.items()}
+    options = replace(base, **updates)
+    # 单一字段都在范围内、组合起来仍然可以没意义：帧级补洞已经能接上
+    # frame_gap_seconds 以内的缝，段级合并阈值低于它就永远不会触发——1.0 的
+    # 合并阈值当年就是这么变成空阈值的，所以这条组合约束必须拦住。
+    if options.adjacent_merge_gap_seconds <= options.frame_gap_seconds:
+        raise ValueError(
+            "adjacent_merge_gap_seconds 必须大于 frame_gap_seconds"
+            f"（当前 {options.adjacent_merge_gap_seconds} <= {options.frame_gap_seconds}）"
+        )
+    return options, frozenset(updates)
+
+
+# 段长上限的候选阶梯。30 是「可读性下限」（再短就碎成卡片），75 是「成本上限」
+# （再长 ASR 单次耗时压过收益）。
+SEGMENT_CAP_LADDER = (30.0, 45.0, 60.0, 75.0)
+
+# 单次 ASR 调用的成本拟合：ms ≈ 2.203·L² − 96·L + 1646（L 为音频秒数）。
+# 三点实测（30s→749ms、60s→3817ms、110s→17743ms）在本机 3050 Ti + CUDA 上
+# 的拟合误差 < 1%。**只用于给段长上限判时间预算**，不参与任何结果计算；
+# 换机器/换模型要重测，不能拿它当「预计耗时」展示给用户。
+_ASR_CALL_COST = (2.203, -96.0, 1646.0)
+
+
+def predicted_asr_seconds(speech_seconds: float, segment_seconds: float) -> float:
+    """按上面的成本模型估一次总识别耗时（仅供内部预算判断）。"""
+    if speech_seconds <= 0 or segment_seconds <= 0:
+        return 0.0
+    quadratic, linear, fixed = _ASR_CALL_COST
+    per_call = quadratic * segment_seconds**2 + linear * segment_seconds + fixed
+    return max(0.0, speech_seconds / segment_seconds * per_call / 1000.0)
+
+
+def _device_segment_cap(backend: str, gpu_memory_total_gb: float | None) -> float:
+    """设备能承受的段长上限。
+
+    只有 CUDA + 大显存才放宽：45 这个默认值本身就是在 4GB 卡上「显存开始
+    thrash」的位置测出来的，显存翻倍后同样的段长不再撞墙，可以少切几刀。
+    拿不到显存就按默认，不做猜测。
+    """
+    if backend != "cuda" or not gpu_memory_total_gb:
+        return 45.0
+    if gpu_memory_total_gb >= 8.0:
+        return 60.0
+    return 45.0
+
+
+def adapt_options(
+    base: DiarizeOptions,
+    *,
+    backend: str,
+    gpu_memory_total_gb: float | None,
+    duration_seconds: float,
+    locked: frozenset[str] = frozenset(),
+    max_embed_window_stride: int = DEFAULT_MAX_EMBED_WINDOW_STRIDE,
+) -> DiarizeOptions:
+    """按「后端 + 显存 + 音频时长」推导两个成本参数。
+
+    只动两个：`embed_window_stride`（分离侧成本）与 `max_segment_seconds`
+    （识别侧成本）。二者都是「给定设备就是常数、换设备就该变」的参数，写死在
+    dataclass 里等于假设所有人用同一张卡。`locked` 里的键来自环境变量覆盖，
+    优先于自动推导——调参时人的判断高于自动推导。
+
+    **步长不是「越粗越省」的成本旋钮**：它受分段模型的窗覆盖倍数硬约束。
+    2026-11-27 曾按「长音频放粗到 6/8」推导，58 分钟音频上每 12s 留 2s 洞，
+    吞掉「全党高度团结统一」。现在长音频与 CPU 都不再提步长，只做封顶钳制；
+    `_embed_windows` 还有一层按真实模型参数的运行时钳制兜底。
+    """
+    stride = base.embed_window_stride
+    if "embed_window_stride" not in locked:
+        ceiling = max(1, int(max_embed_window_stride))
+        stride = min(stride, ceiling)
+
+    cap = base.max_segment_seconds
+    if "max_segment_seconds" not in locked:
+        ceiling = _device_segment_cap(backend, gpu_memory_total_gb)
+        # 时间预算：多花的时间不超过 60s 固定开销 + 音频时长的 3%。
+        # 语音占比按 90% 估（实测 91–97%），宁可估高一点。
+        budget = 60.0 + 0.03 * max(0.0, duration_seconds)
+        speech_guess = max(0.0, duration_seconds) * 0.9
+        cap = SEGMENT_CAP_LADDER[0]
+        for candidate in SEGMENT_CAP_LADDER:
+            if candidate > ceiling:
+                break
+            if predicted_asr_seconds(speech_guess, candidate) <= budget:
+                cap = candidate
+
+    return replace(base, embed_window_stride=int(stride), max_segment_seconds=float(cap))
+
 
 
 @dataclass
@@ -394,7 +621,6 @@ def extract_segments(
     frame_offset: float,
     overlap: np.ndarray | None,
     options: DiarizeOptions,
-    max_gap_seconds: float = 0.5,
 ) -> np.ndarray:
     """Turn per-cluster frame activity into [start, end, cluster] segments."""
     frame_count, cluster_count = active.shape
@@ -418,7 +644,7 @@ def extract_segments(
         raw = [(frame_start(max(s, 0)), frame_start(e)) for s, e in zip(starts, ends)]
         merged: list[list[float]] = []
         for begin, finish in raw:
-            if merged and begin - merged[-1][1] <= max_gap_seconds:
+            if merged and begin - merged[-1][1] <= options.frame_gap_seconds:
                 merged[-1][1] = finish
             else:
                 merged.append([begin, finish])
@@ -552,18 +778,37 @@ class Diarizer:
         self.embedder = embedder
         self.options = options or DiarizeOptions()
 
-    def _embed_windows(self, audio: _AudioBlocks, segmentation, progress=None):
-        """One embedding per (window, local speaker) with enough clean speech."""
+    def _effective_embed_stride(self, options: DiarizeOptions) -> int:
+        """按真实分段模型的窗覆盖倍数钳制步长（与设置来源无关）。
+
+        这是最后一道防线：即使环境变量把步长覆盖成 8，或旧调用方传进一份
+        按长音频放粗过的参数，也不允许采样窗之间出现无覆盖的洞。
+        """
+        window_samples = int(getattr(self.segmenter, "window_samples", 0) or 0)
+        shift_samples = int(getattr(self.segmenter, "window_shift_samples", 0) or 0)
+        limit = max_safe_embed_stride(window_samples, shift_samples)
+        requested = max(1, int(options.embed_window_stride))
+        return min(requested, limit) if limit else requested
+
+    def _embed_windows(self, audio: _AudioBlocks, segmentation, progress=None, options=None):
+        """One embedding per (window, local speaker) with enough clean speech.
+
+        `options` 必须由 `run` 传进来：嵌入选窗、步长、最小帧数都随本次音频的
+        时长变化，读 `self.options` 会悄悄用构造时那份基线值。
+        """
+        options = options or self.options
         labels = segmentation.window_labels
         window_count, frames_per_window, local_speakers = labels.shape
         receptive_shift = self.segmenter.receptive_shift_samples
         # Overlap frames mix two voices; the vector resembles neither.
-        clean = labels * (labels.sum(axis=2, keepdims=True) < 2)
+        clean = labels * (
+            labels.sum(axis=2, keepdims=True) < options.embed_frame_max_local_speakers
+        )
 
         embeddings: list[np.ndarray] = []
         pairs: list[tuple[int, int]] = []
         report_every = max(1, window_count // 20)
-        stride = max(1, int(self.options.embed_window_stride))
+        stride = self._effective_embed_stride(options)
         # Always include the final window so the tail is never unsampled.
         targets = list(range(0, window_count, stride))
         if targets and targets[-1] != window_count - 1:
@@ -573,7 +818,7 @@ class Diarizer:
             offset = int(segmentation.window_offsets[window])
             for speaker in range(local_speakers):
                 flags = clean[window, :, speaker]
-                if int(flags.sum()) < self.options.min_active_frames:
+                if int(flags.sum()) < options.min_active_frames:
                     continue
                 indices = np.flatnonzero(flags)
                 breaks = np.flatnonzero(np.diff(indices) > 1) + 1
@@ -614,9 +859,15 @@ class Diarizer:
         return np.asarray(embeddings, dtype=np.float32), np.asarray(pairs, dtype=np.int64)
 
     def _vote(
-        self, segmentation, pairs: np.ndarray, labels: np.ndarray, cluster_count: int
+        self,
+        segmentation,
+        pairs: np.ndarray,
+        labels: np.ndarray,
+        cluster_count: int,
+        options=None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Aggregate per-window local labels into global cluster frame activity."""
+        options = options or self.options
         frame_count = segmentation.frame_count
         receptive_shift = self.segmenter.receptive_shift_samples
         votes = np.zeros((frame_count, cluster_count), dtype=np.float32)
@@ -647,23 +898,42 @@ class Diarizer:
             cover[start:end] += 1
 
         scores = votes / np.maximum(cover, 1.0)[:, np.newaxis]
-        return scores, scores >= 0.5
+        # 没有任何采样窗覆盖的帧必须判为不活跃。step=6 时这些帧恰好是吞字的
+        # 2s 洞；显式写进判据，避免将来把 vote_threshold 调到 0 或浮点误差
+        # 让 cover=0 的帧重新混进段里。
+        active = (scores >= options.vote_threshold) & (cover > 0)[:, np.newaxis]
+        return scores, active
 
-    def run(self, source, *, progress=None) -> DiarizeResult:
-        options = self.options
+    def run(self, source, *, progress=None, options: DiarizeOptions | None = None) -> DiarizeResult:
+        """Run the pipeline.
+
+        `options` 是「本次请求」的参数：段长上限与嵌入步长要按音频时长和当前
+        设备推导，不能在构造时定死（同一个 Diarizer 会处理 2 分钟和 2 小时的
+        音频）。不传就用构造时的基线值。
+        """
+        options = options or self.options
         segmentation = self.segmenter.segment(source, progress=progress)
         duration = segmentation.duration_seconds
         stats: dict = {
             "windows": segmentation.window_count,
             "frames": segmentation.frame_count,
             "duration": round(duration, 3),
+            # 本次生效的两个成本参数：自适应选了什么必须能从结果里反查，
+            # 否则「为什么这次段更碎/更慢」只能靠猜。
+            "max_segment_seconds": options.max_segment_seconds,
+            # 实际生效的步长可能被模型窗覆盖倍数钳小；同时保留请求值，
+            # 否则「为什么这次没有洞」在日志里查不出来。
+            "embed_window_stride": self._effective_embed_stride(options),
+            "requested_embed_window_stride": int(options.embed_window_stride),
         }
         if segmentation.frame_count == 0:
             return DiarizeResult([], 0, duration, stats)
 
         audio = _AudioBlocks(source, options.audio_block_seconds)
         try:
-            embeddings, pairs = self._embed_windows(audio, segmentation, progress)
+            embeddings, pairs = self._embed_windows(
+                audio, segmentation, progress, options
+            )
         finally:
             audio.close()
 
@@ -678,7 +948,9 @@ class Diarizer:
         # Collapse can only be judged once segments exist, and fixing it means
         # re-clustering with a tighter cut. Bound the retries.
         for _ in range(3):
-            _, active = self._vote(segmentation, pairs, labels, int(labels.max()) + 1)
+            _, active = self._vote(
+                segmentation, pairs, labels, int(labels.max()) + 1, options
+            )
             segments = extract_segments(
                 active,
                 segmentation.frame_shift_seconds,
@@ -717,7 +989,7 @@ class Diarizer:
         order = sorted(durations, key=lambda key: durations[key], reverse=True)
         renumber = {old: new for new, old in enumerate(order)}
 
-        overlap_flags = self._overlap_flags(segmentation, segments)
+        overlap_flags = self._overlap_flags(segmentation, segments, options)
         items = [
             DiarizeSegment(
                 speaker_id=renumber[int(cluster)],
@@ -737,11 +1009,11 @@ class Diarizer:
         stats["overlap_ratio"] = round(float(segmentation.overlap.mean()), 4)
         return DiarizeResult(items, len(renumber), duration, stats)
 
-    @staticmethod
-    def _overlap_flags(segmentation, segments: np.ndarray) -> np.ndarray:
+    def _overlap_flags(self, segmentation, segments: np.ndarray, options=None) -> np.ndarray:
         """Mark segments whose span is mostly covered by overlapped frames."""
         if len(segments) == 0:
             return np.zeros(0, dtype=bool)
+        options = options or self.options
         shift = segmentation.frame_shift_seconds
         flags = np.zeros(len(segments), dtype=bool)
         for index, (start, end, _) in enumerate(segments):
@@ -749,5 +1021,8 @@ class Diarizer:
             finish = min(segmentation.frame_count, int((end - segmentation.frame_offset_seconds) / shift) + 1)
             if finish <= begin:
                 continue
-            flags[index] = bool(segmentation.overlap[begin:finish].mean() >= 0.5)
+            flags[index] = bool(
+                segmentation.overlap[begin:finish].mean()
+                >= options.overlap_frame_share
+            )
         return flags

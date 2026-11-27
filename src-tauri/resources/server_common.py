@@ -326,7 +326,14 @@ class BaseASRServer:
         if getattr(self, "backend", self.device) != "cuda":
             return info
         cached = getattr(self, "_gpu_device_info_cache", None)
-        if cached is not None:
+        # 缓存要区分「查过显存」和「只查了名字」：initialize() 先做了一次
+        # include_memory=False 的调用，如果这里直接返回，后面要显存的调用就永远
+        # 拿到 None，自适应逻辑会静默退回默认值。探不到也算查过（标记在
+        # `_gpu_memory_probed`，不往 info 里塞 None——响应体不能凭空多一个字段）。
+        probed = getattr(self, "_gpu_memory_probed", False) or (
+            cached is not None and "gpu_memory_total" in cached
+        )
+        if cached is not None and (not include_memory or probed):
             return dict(cached)
         try:
             fields = "name,memory.total" if include_memory else "name"
@@ -349,6 +356,10 @@ class BaseASRServer:
                     info["gpu_name"] = first.strip()
         except (OSError, subprocess.SubprocessError, IndexError, ValueError):
             pass
+        if include_memory:
+            # 探不到也要记住「查过了」，否则每次转写都会重跑一次 nvidia-smi，
+            # 白等 3 秒超时。
+            self._gpu_memory_probed = True
         self._gpu_device_info_cache = dict(info)
         return info
 

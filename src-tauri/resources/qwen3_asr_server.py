@@ -58,7 +58,9 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
         self._vad_calls = 0
         self._vad_rejected = 0
 
-    def _get_gpu_device_info(self):
+    def _get_gpu_device_info(self, *, include_memory: bool = False) -> dict:
+        # 这个服务端一直带显存总量（响应里要展示），所以忽略调用方的偏好；
+        # 但签名必须跟基类一致，否则基类的通用调用方一传参就 TypeError。
         return super()._get_gpu_device_info(include_memory=True)
 
     def _resolve_model_path(self):
@@ -396,10 +398,78 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
         embedder = SpeakerEmbedder(
             embedding_path, SpeakerEmbeddingOptions(num_threads=threads)
         )
-        diarizer = Diarizer(segmenter, embedder)
+        diarizer = Diarizer(segmenter, embedder, self._diarize_base_options()[0])
         self._diarizer_cache = diarizer
         logger.info("说话人分离模型加载完成（分段 + 声纹）")
         return diarizer
+
+    def _diarize_base_options(self):
+        """基线参数 + 被环境变量覆盖的键；解析失败退回默认并记 ERROR。
+
+        读一次就缓存：环境变量在一个进程生命周期里不会变，而每次转写都重读
+        会让「日志里到底是哪套参数」变得不可信。
+        """
+        cached = getattr(self, "_diarize_base_cache", None)
+        if cached is not None:
+            return cached
+
+        from speaker_diarize import DiarizeOptions, load_options_from_env
+
+        try:
+            options, locked = load_options_from_env()
+        except ValueError as exc:
+            # 不抛给上层：覆盖写错不该让转写失败，但它必须显眼。
+            logger.error("说话人分离参数覆盖无效，改用默认值: %s", exc)
+            options, locked = DiarizeOptions(), frozenset()
+        if locked:
+            logger.info(
+                "说话人分离参数被环境变量覆盖: %s",
+                ", ".join(sorted(f"{key}={getattr(options, key)}" for key in locked)),
+            )
+        self._diarize_base_cache = (options, locked)
+        return self._diarize_base_cache
+
+    def _diarize_options_for(self, duration_seconds: float):
+        """按本次音频时长与当前设备推导本次要用的参数，并把生效值写进日志。"""
+        from speaker_diarize import (
+            DEFAULT_MAX_EMBED_WINDOW_STRIDE,
+            adapt_options,
+            max_safe_embed_stride,
+        )
+
+        base, locked = self._diarize_base_options()
+        # `transcribe_diarized` 先建 diarizer 再算本次参数，所以这里拿得到
+        # 真实的分段模型元数据。步长上限必须按模型的窗长/移位算，不能写死：
+        # 那正是 stride 6/8 留下 2s 洞、吞掉「全党高度团结统一」的原因。
+        diarizer = getattr(self, "_diarizer_cache", None)
+        segmenter = getattr(diarizer, "segmenter", None)
+        max_stride = DEFAULT_MAX_EMBED_WINDOW_STRIDE
+        if segmenter is not None:
+            derived = max_safe_embed_stride(
+                int(getattr(segmenter, "window_samples", 0) or 0),
+                int(getattr(segmenter, "window_shift_samples", 0) or 0),
+            )
+            if derived:
+                max_stride = derived
+        options = adapt_options(
+            base,
+            backend=self.backend,
+            gpu_memory_total_gb=self._get_gpu_device_info(include_memory=True).get(
+                "gpu_memory_total"
+            ),
+            duration_seconds=duration_seconds,
+            locked=locked,
+            max_embed_window_stride=max_stride,
+        )
+        logger.info(
+            "说话人分离本次参数: 段长上限=%ss 嵌入步长=%s(上限%s) 合并间隔=%ss 帧补洞=%ss",
+            options.max_segment_seconds,
+            options.embed_window_stride,
+            max_stride,
+            options.adjacent_merge_gap_seconds,
+            options.frame_gap_seconds,
+        )
+        return options
 
     def _diarization_progress(self, payload):
         phase = payload.get("phase")
@@ -482,7 +552,11 @@ class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
         try:
             self.report_progress("diarize_segment", duration=round(duration, 3))
             started = time.perf_counter()
-            result = diarizer.run(audio_path, progress=self._diarization_progress)
+            result = diarizer.run(
+                audio_path,
+                progress=self._diarization_progress,
+                options=self._diarize_options_for(duration),
+            )
             diarize_ms = (time.perf_counter() - started) * 1000
             if not result.segments:
                 return {

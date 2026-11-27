@@ -1,19 +1,26 @@
 import os
 import sys
 import unittest
+from dataclasses import fields, replace
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from speaker_diarize import (
+    DIARIZE_OVERRIDES_ENV,
     DiarizeOptions,
+    Diarizer,
+    _OVERRIDE_BOUNDS,
     _compact,
+    adapt_options,
     average_linkage,
     cluster_embeddings,
     detect_collapse,
     drop_phantom_clusters,
     extract_segments,
+    load_options_from_env,
+    max_safe_embed_stride,
     merge_adjacent_same_speaker,
     merge_short_segments,
     merge_similar_clusters,
@@ -25,6 +32,36 @@ from speaker_segmentation import _powerset_matrix, _softmax
 def _normalized(rows):
     matrix = np.asarray(rows, dtype=np.float32)
     return matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
+
+
+class _FakeSegmenter:
+    receptive_shift_samples = 1600
+    # 与真实 pyannote 导出一致：10s 窗 / 2s 移位 -> 安全步长 4。
+    window_samples = 160_000
+    window_shift_samples = 32_000
+
+
+class _FakeEmbedder:
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, span):
+        self.calls += 1
+        return np.array([1.0, 0.0], dtype=np.float32)
+
+
+class _FakeSegmentation:
+    """只够 `_embed_windows` 用：窗数、每窗帧数、一个本地说话人。"""
+
+    def __init__(self, windows=8, frames=20):
+        self.window_labels = np.ones((windows, frames, 1), dtype=np.float32)
+        self.window_offsets = np.arange(windows) * 160_000
+
+
+class _FakeAudio:
+    def read(self, start, end):
+        length = max(0, int(end) - int(start))
+        return np.ones(length, dtype=np.float32)
 
 
 class AverageLinkageTests(unittest.TestCase):
@@ -285,6 +322,232 @@ class SegmentExtractionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(segments), 0)
+
+    def test_frame_gap_comes_from_options(self):
+        # 帧级补洞的 0.5 以前是函数默认参数，和 DiarizeOptions 里的合并阈值
+        # 各管一段，调一个完全看不到另一个的效果。它必须能被单独调。
+        active = np.zeros((20, 1), dtype=bool)
+        active[0:5, 0] = True
+        active[7:12, 0] = True  # 2 帧空隙 = 0.2s
+
+        loose = extract_segments(active, 0.1, 0.0, None, DiarizeOptions())
+        tight = extract_segments(
+            active, 0.1, 0.0, None, replace(DiarizeOptions(), frame_gap_seconds=0.1)
+        )
+
+        self.assertEqual(len(loose), 1)
+        self.assertEqual(len(tight), 2)
+
+
+class VoteCoverageTests(unittest.TestCase):
+    def test_frames_without_a_sampling_window_are_never_active(self):
+        # cover=0 的帧是 stride 过大的直接后果。把阈值放到 0 来证明判据里
+        # 真的有 cover>0 这一项，而不是靠 score 恰好低于 0.5 侥幸过关。
+        class Segmentation:
+            frame_count = 6
+            frames_per_window = 3
+            window_count = 2
+            receptive_shift_samples = 1600
+            window_offsets = np.array([0, 9600])
+            window_labels = np.ones((2, 3, 1), dtype=np.float32)
+
+        diarizer = Diarizer(_FakeSegmenter(), _FakeEmbedder())
+        _, active = diarizer._vote(
+            Segmentation(),
+            np.array([[0, 0]]),
+            np.array([0]),
+            1,
+            replace(DiarizeOptions(), vote_threshold=0.0),
+        )
+
+        self.assertEqual(active[:, 0].tolist(), [True, True, True, False, False, False])
+
+
+class OptionOverrideTests(unittest.TestCase):
+    def test_no_env_keeps_defaults(self):
+        options, locked = load_options_from_env(environ={})
+
+        self.assertEqual(options, DiarizeOptions())
+        self.assertEqual(locked, frozenset())
+
+    def test_known_key_is_applied_and_reported(self):
+        options, locked = load_options_from_env(
+            environ={DIARIZE_OVERRIDES_ENV: '{"adjacent_merge_gap_seconds": 1.5}'}
+        )
+
+        self.assertEqual(options.adjacent_merge_gap_seconds, 1.5)
+        self.assertEqual(locked, frozenset({"adjacent_merge_gap_seconds"}))
+        self.assertEqual(
+            options.max_segment_seconds, DiarizeOptions().max_segment_seconds
+        )
+
+    def test_unknown_key_is_an_error_not_silently_ignored(self):
+        # 静默忽略最难受：以为调了，其实没生效。
+        with self.assertRaises(ValueError) as caught:
+            load_options_from_env(environ={DIARIZE_OVERRIDES_ENV: '{"merge_gap": 3.0}'})
+
+        self.assertIn("merge_gap", str(caught.exception))
+
+    def test_out_of_range_is_rejected(self):
+        # 0.5 是 openwhispr 的值，实测会把两个人并成一个；必须拦在入口。
+        with self.assertRaises(ValueError):
+            load_options_from_env(
+                environ={DIARIZE_OVERRIDES_ENV: '{"merge_centroid_cos": 0.5}'}
+            )
+
+    def test_int_key_rejects_fraction(self):
+        with self.assertRaises(ValueError):
+            load_options_from_env(
+                environ={DIARIZE_OVERRIDES_ENV: '{"embed_window_stride": 2.5}'}
+            )
+
+    def test_malformed_json_is_rejected(self):
+        with self.assertRaises(ValueError):
+            load_options_from_env(environ={DIARIZE_OVERRIDES_ENV: "{not json}"})
+
+    def test_combination_that_makes_a_threshold_dead_is_rejected(self):
+        # 每个字段都合法，组合起来却让段级合并永不触发——这正是 1.0 当年
+        # 变成空阈值的方式，必须在入口拦住。
+        with self.assertRaises(ValueError):
+            load_options_from_env(
+                environ={DIARIZE_OVERRIDES_ENV: '{"frame_gap_seconds": 3.0}'}
+            )
+
+    def test_non_object_payload_is_rejected(self):
+        with self.assertRaises(ValueError):
+            load_options_from_env(environ={DIARIZE_OVERRIDES_ENV: "[1, 2]"})
+
+    def test_every_option_has_a_bounds_entry(self):
+        # 结构性防漏：新增字段忘了进覆盖表，它就既不能调也没有范围保护，
+        # 而且没人会注意到。这条测试替代码检查。
+        missing = sorted(
+            field.name
+            for field in fields(DiarizeOptions)
+            if field.name not in _OVERRIDE_BOUNDS
+        )
+
+        self.assertEqual(missing, [])
+
+
+class AdaptiveOptionTests(unittest.TestCase):
+    def _adapt(self, **overrides):
+        params = {
+            "backend": "cuda",
+            "gpu_memory_total_gb": 4.0,
+            "duration_seconds": 1860.0,
+        }
+        params.update(overrides)
+        return adapt_options(DiarizeOptions(), **params)
+
+    def test_small_gpu_keeps_the_45s_ceiling(self):
+        self.assertEqual(self._adapt().max_segment_seconds, 45.0)
+
+    def test_big_gpu_raises_the_ceiling(self):
+        self.assertEqual(self._adapt(gpu_memory_total_gb=12.0).max_segment_seconds, 60.0)
+
+    def test_unknown_vram_falls_back_to_default(self):
+        self.assertEqual(self._adapt(gpu_memory_total_gb=None).max_segment_seconds, 45.0)
+
+    def test_cpu_backend_never_raises_the_ceiling(self):
+        self.assertEqual(
+            self._adapt(backend="cpu", gpu_memory_total_gb=16.0).max_segment_seconds, 45.0
+        )
+
+    def test_very_long_audio_stays_at_45_even_on_a_big_gpu(self):
+        # 2 小时：60s 段按成本模型要 ~412s，超出「60s + 3% 时长」的 276s 预算，
+        # 45s 段只要 ~257s，所以落回 45。预算判据在这里才真正起作用。
+        self.assertEqual(
+            self._adapt(
+                gpu_memory_total_gb=12.0, duration_seconds=7200.0
+            ).max_segment_seconds,
+            45.0,
+        )
+
+    def test_stride_stays_safe_even_for_long_audio(self):
+        # 回归：按「长音频放粗」推到 6/8 时，10s/2s 模型的采样窗相隔 12/16s，
+        # 每 12s 留 2s 无覆盖洞，58 分钟录音上吞掉了「全党高度团结统一」。
+        for duration in (1000.0, 3000.0, 6000.0, 12000.0):
+            options = self._adapt(duration_seconds=duration)
+            self.assertEqual(options.embed_window_stride, 4)
+            self.assertLess(
+                options.embed_window_stride * _FakeSegmenter.window_shift_samples,
+                _FakeSegmenter.window_samples,
+            )
+
+    def test_cpu_backend_does_not_coarsen_stride(self):
+        # CPU 慢的是算力，不是覆盖倍数；放粗步长同样会留洞。
+        self.assertEqual(self._adapt(backend="cpu").embed_window_stride, 4)
+
+    def test_coverage_limit_comes_from_the_model(self):
+        self.assertEqual(max_safe_embed_stride(160_000, 32_000), 4)
+        self.assertEqual(max_safe_embed_stride(160_000, 16_000), 9)
+        self.assertEqual(max_safe_embed_stride(0, 0), 0)
+
+    def test_runtime_clamps_an_explicit_stride(self):
+        # 环境变量锁定 stride=8 时 adapt_options 尊重人，但最后一道防线
+        # 仍要按真实模型把它压回 4，否则旧参数一样会吞字。
+        embedder = _FakeEmbedder()
+        diarizer = Diarizer(_FakeSegmenter(), embedder)
+        segmentation = _FakeSegmentation(windows=16)
+
+        diarizer._embed_windows(
+            _FakeAudio(),
+            segmentation,
+            None,
+            replace(DiarizeOptions(), embed_window_stride=8),
+        )
+
+        # stride 4 + 补最后一窗 = 0,4,8,12,15 共 5 次；stride 8 只会 3 次。
+        self.assertEqual(embedder.calls, 5)
+        self.assertEqual(diarizer._effective_embed_stride(DiarizeOptions()), 4)
+
+    def test_locked_keys_survive_adaptation(self):
+        # 人是来调参的，自动化不该把人填的值改回去。
+        options, locked = load_options_from_env(
+            environ={
+                DIARIZE_OVERRIDES_ENV: (
+                    '{"max_segment_seconds": 30.0, "embed_window_stride": 2}'
+                )
+            }
+        )
+
+        adapted = adapt_options(
+            options,
+            backend="cuda",
+            gpu_memory_total_gb=12.0,
+            duration_seconds=6000.0,
+            locked=locked,
+        )
+
+        self.assertEqual(adapted.max_segment_seconds, 30.0)
+        self.assertEqual(adapted.embed_window_stride, 2)
+
+    def test_per_call_options_reach_the_embedding_stride(self):
+        # 回归：helper 读的是 `self.options`（构造时的基线）而不是 run 传进来的
+        # 本次参数时，自适应推导出的步长完全不生效，而且没有任何报错。
+        embedder = _FakeEmbedder()
+        diarizer = Diarizer(_FakeSegmenter(), embedder)
+        segmentation = _FakeSegmentation()
+
+        diarizer._embed_windows(
+            _FakeAudio(),
+            segmentation,
+            None,
+            replace(DiarizeOptions(), embed_window_stride=1),
+        )
+        dense = embedder.calls
+        embedder.calls = 0
+        diarizer._embed_windows(
+            _FakeAudio(),
+            segmentation,
+            None,
+            replace(DiarizeOptions(), embed_window_stride=4),
+        )
+        sparse = embedder.calls
+
+        self.assertEqual(dense, 8)
+        # stride 4 + 补最后一窗 = 3 次（0、4、7）。
+        self.assertEqual(sparse, 3)
 
 
 class PowersetTests(unittest.TestCase):

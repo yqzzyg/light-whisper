@@ -11,6 +11,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 
 import qwen3_asr_server
+import server_common
 
 
 class FakeNativeRuntime:
@@ -71,8 +72,11 @@ class UnloadingDiarizer:
     def __init__(self, server, segments):
         self.server = server
         self.segments = segments
+        # 本次请求的参数必须由服务端按设备/时长推导后传进来，不能吃构造时的默认值。
+        self.options = None
 
-    def run(self, audio_path, progress=None):
+    def run(self, audio_path, progress=None, options=None):
+        self.options = options
         self.server._suspend_gpu_runtime()
         return FakeDiarizeResult(self.segments)
 
@@ -98,6 +102,26 @@ class Qwen3ASRServerTests(unittest.TestCase):
         gpu_info_patcher.start()
         self.gpu_info_patcher = gpu_info_patcher
         self.addCleanup(gpu_info_patcher.stop)
+
+    def test_gpu_info_override_keeps_the_base_signature(self):
+        # 回归：子类把签名收窄成 fn(self)，基类的通用调用方（分离参数自适应）
+        # 一传 include_memory 就 TypeError，而它被 except 吞成「分离失败降级」，
+        # 界面上只表现为「这次没做说话人分离」。真实环境跑一次才发现。
+        self.gpu_info_patcher.stop()
+        server = object.__new__(qwen3_asr_server.Qwen3ASRServer)
+        server.device = "cuda"
+        server.backend = "cuda"
+        server._gpu_device_info_cache = None
+
+        with mock.patch.object(
+            server_common.BaseASRServer,
+            "_get_gpu_device_info",
+            return_value={"device": "cuda", "gpu_memory_total": 4.0},
+        ) as base:
+            info = server._get_gpu_device_info(include_memory=True)
+
+        base.assert_called_once_with(include_memory=True)
+        self.assertEqual(info["gpu_memory_total"], 4.0)
 
     def test_gpu_metadata_failure_does_not_discard_loaded_runtime(self):
         self.gpu_info_patcher.stop()
@@ -377,14 +401,18 @@ class Qwen3ASRServerTests(unittest.TestCase):
                     FakeDiarizeSegment(0, 0.0, 1.0),
                     FakeDiarizeSegment(1, 1.0, 2.0),
                 ]
+                diarizer_double = UnloadingDiarizer(server, segments)
                 with mock.patch.object(
                     server,
                     "_diarizer",
-                    return_value=UnloadingDiarizer(server, segments),
+                    return_value=diarizer_double,
                 ):
                     result = server.transcribe_diarized(audio_path)
 
                 self.assertTrue(result["success"], result)
+                # 24GB 卡 + 31s 音频：自适应该选 60s 上限，而不是构造时的 45。
+                self.assertIsNotNone(diarizer_double.options)
+                self.assertEqual(diarizer_double.options.max_segment_seconds, 60.0)
                 self.assertEqual(
                     [item["speaker_id"] for item in result["segments"]], [0, 1]
                 )

@@ -1184,6 +1184,161 @@ ASR 时间 59.9s → **138.2s**（2.0/115），端到端 107s → **200s**。
 
 ---
 
+### 9.8 阈值不放设置项，改为「唯一真源 + 覆盖入口 + 设备自适应」（2026-11-26）
+
+`DiarizeOptions` 里 19 个阈值全部写死在代码里，问题是「要不要做成用户可配置」。
+结论是**不做**，理由不是懒：
+
+- 这些数没有「用户想要的正确值」，只有「这套模型 + 这台机器上的正确值」。
+  换 CAM++ 或 pyannote 版本，`cluster_distance_cut` / `merge_centroid_cos` 要重算。
+- 失败是**静默**的：阈值调错不会报错，只会把两个人并成一人或把一个人拆成两人，
+  界面上照样出结果。这种参数不该让用户自助调。
+- 组合不可测：19 个数值参数，出错只在「说话人分错」时暴露。
+
+改成三层机制：
+
+#### 1. 唯一真源：`DiarizeOptions`
+
+以前阈值散在三层且互不联动——`extract_segments(max_gap_seconds=0.5)` 是函数
+默认参数、投票阈值 `scores >= 0.5` 写死在校验函数体里、`DiarizeOptions` 又是
+另一套。**1.0 的合并阈值当初变成空阈值，根因就是这种割裂**（帧级补洞吃掉
+0.5s，段级还在等 1.0s）。本次把三处收进 `DiarizeOptions`：
+
+| 新增字段 | 原位置 | 值 |
+|---|---|---|
+| `frame_gap_seconds` | `extract_segments` 的默认参数 | 0.5 |
+| `vote_threshold` | `_vote` 里的 `scores >= 0.5` | 0.5 |
+| `overlap_frame_share` | `_overlap_flags` 里的 `mean() >= 0.5` | 0.5 |
+| `embed_frame_max_local_speakers` | `_embed_windows` 里的 `< 2` | 2 |
+
+`extract_segments` 的 `max_gap_seconds` 参数被**删掉**（不是给默认值），
+这样没人能再从调用点绕开 options。
+
+#### 2. 覆盖入口：`LIGHT_WHISPER_DIARIZE_OVERRIDES`
+
+只给开发与回归用，不进用户配置、不参与打包默认值：
+
+```text
+LIGHT_WHISPER_DIARIZE_OVERRIDES='{"adjacent_merge_gap_seconds": 1.5}'
+```
+
+- 未知键、类型错、越界（每个字段都有区间，见 `_OVERRIDE_BOUNDS`）、JSON 坏
+  → 抛 `ValueError`，服务端记 **ERROR** 后退回默认值。静默忽略最难受：
+  以为调了其实没生效。
+- 被覆盖的键会打一行 INFO，且**优先于自动推导**——人来调参时，人的判断高于
+  自适应。
+- 范围不是随手圈的：`merge_centroid_cos` 下界 0.70 是因为异人实测 0.683，
+  低于它就会吞掉真实的第二个人。
+
+#### 3. 设备自适应：`adapt_options`
+
+两个「成本参数」本来就不该是常量，它们跟设备走：
+
+| 参数 | 规则 |
+|---|---|
+| `embed_window_stride` | 固定 4，且受模型窗覆盖倍数硬钳制（见 §9.9）；**不**随设备/时长放粗 |
+| `max_segment_seconds` | 设备上限：CUDA + 显存 ≥8GB → 60，其余 45；再叠加时间预算 |
+
+时间预算用单次调用成本拟合 `ms ≈ 2.203·L² − 96·L + 1646`（30/60/110s 三点实测，
+误差 <1%）：选「不超过 60s + 3% 音频时长」的最大段长。2 小时音频在 12GB 卡上
+仍会退回 45，因为 60s 段要 ~412s，超出 276s 预算。
+
+这个拟合**只用于预算判断，不参与结果、不展示给用户**；换机器要重测。
+
+#### 踩到的坑（真实运行才发现）
+
+`Qwen3ASRServer._get_gpu_device_info(self)` 把基类签名收窄了（基类是
+`(*, include_memory=False)`），自适应代码一传 `include_memory=True` 就
+`TypeError`，又被 `transcribe_diarized` 的 `except` 吞成「分离失败 → 整段转写」。
+**界面上只表现为「这次没做分离」**，日志里也只是一行降级原因。单测没抓到是因为
+测试把 `_get_gpu_device_info` 整个 patch 掉了。已修签名并补一条契约测试
+（`test_gpu_info_override_keeps_the_base_signature`）。
+
+另：`_get_gpu_device_info` 的缓存以前不区分「查过显存」和「只查了名字」，
+`initialize()` 先做一次 `include_memory=False` 之后，后面要显存的调用永远拿到
+缓存里的旧字典、`.get("gpu_memory_total")` 恒为 None —— 自适应会静默失效。
+现在缓存命中要求带上 `gpu_memory_total` 键（探不到也落 None，避免每次转写重跑
+nvidia-smi 白等 3 秒）。
+
+#### 踩到的第二个坑：helper 读的是构造时的 options
+
+`Diarizer.run(options=...)` 只让 `run` 内部的局部变量换成了本次参数，而
+`_embed_windows` / `_vote` / `_overlap_flags` 三个 helper 仍然读
+`self.options`。结果是**自适应推导出的步长与投票阈值完全不生效，而且没有任何
+报错**——正好是本文档反复出现的同一类问题：阈值不在一个地方。
+
+现在三个 helper 都显式接收 `options`，并补了一条回归
+（`test_per_call_options_reach_the_embedding_stride`：同一个 Diarizer 传
+stride=1 与 stride=4，嵌入次数必须是 8 与 3，读实例字段就只能是 3 与 3）。
+
+#### 验证
+
+- `test_speaker_diarize` 45 条（新增 17 条：覆盖解析 7 条、自适应 8 条、
+  帧补洞走 options 1 条、helper 读对 options 1 条）
+- `test_qwen3_asr_server` 新增 1 条签名契约测试，分离链路的桩改为断言
+  「本次参数被传进来」，24GB 卡 + 31s 音频应选 60s
+- `test_qwen_gpu_metadata` 的「探不到就不该凭空多字段」仍然成立（探过的标记
+  放在独立属性上，不往响应体里塞 `gpu_memory_total: None`）
+- 真实 31 分钟音频重跑：本机 4GB 卡推导为 45s / 步长 4，106 段、0 段超 45s，
+  文本与手工调参那次逐字一致
+
+---
+
+### 9.9 吞字：自适应步长把采样窗拉出覆盖缺口（2026-11-27）
+
+用户反馈 58 分钟党课文稿在 01:19 少了一句「全党高度团结统一」。逐段核对
+落库结果与音频：79.26–81.98 是「第二，这是巩固和发展全」，**81.98–84.03
+不属于任何段**，单送这段 ASR 得「党高度团结统一。」——不是识别错，是这段
+音频从来没进过 ASR。全局 303 段之间有 299 个空隙、合计 743s（21%），
+98% 的空隙有正常语音能量，段长 9.94s + 空隙 2.06s 呈 12s 周期。
+
+**根因是 §9.8 的自适应步长**，不是 §9.7 的段长或合并阈值。分段模型窗长
+10s、窗起点每 2s 一个，覆盖倍数 5。`_embed_windows` 每 stride 个窗取一个，
+采样窗起点相隔 `stride × 2s`：
+
+| stride | 采样间隔 | 覆盖缺口 |
+|---|---|---|
+| 4 | 8s | −2s（重叠，安全） |
+| 5 | 10s | 0（临界） |
+| **6** | **12s** | **+2s（每 12s 漏 2s）** |
+| 8 | 16s | +6s |
+
+58 分钟 > 45min，自适应把步长推到 6；窗口 36 覆盖 72–82s、下个采样窗 42
+覆盖 84–94s，中间 81.98–84.03 正好是那句话。用 stride 6 重跑完整音频，
+段边界与落库逐毫秒一致，确认是确定性产物。之前的回归只测 31 分钟，走不到
+这个分支，所以没抓到。
+
+**主修三点**（`docs/neo/speaker-diarization-plan.md` 之外只动 Python 资源）：
+
+1. `max_safe_embed_stride(window_samples, window_shift_samples)` 按真实模型
+   元数据算上限，留一窗余量（倍数 5 → 4）。`adapt_options` **取消**「非 CUDA
+   或长音频放粗到 6/8」的规则，只做封顶钳制；`_diarize_options_for` 从已加载
+   的 segmenter 传入实际窗长/移位，不再依赖写死的 4。
+2. `Diarizer._embed_windows` 用同一 helper 做运行时硬钳制。即使环境变量锁定
+   `embed_window_stride=8`，实际采样也不会留洞；日志同时记录请求值与实际
+   值（`stats["requested_embed_window_stride"]` / `["embed_window_stride"]`）。
+3. `_vote` 把 `cover > 0` 写进活跃判据。注意这只是防御性显式化：钳制后不会
+   再出现 cover=0 的语音帧，**没有**做「从相邻窗插值恢复」——那会给模型没
+   看过的帧硬贴标签，风险大于收益。
+
+回归补在 `test_speaker_diarize`：长音频（含 12000s）步长恒为 4、`max_safe`
+按模型计算、显式步长 8 在运行时压回 4、cover=0 帧在阈值 0 下仍不活跃。
+之前 §9.8 的 45 条测试走不到本分支，这是漏测的直接原因。
+
+#### 实测（2026-11-27，同一份 58 分钟 `党课.wav`）
+
+修复前：生效步长 6，303 段，299 个空隙合计 743s，81.98–84.03 无段覆盖。
+修复后：生效步长 4（模型元数据算出上限 4），**94 段**，`speech_ratio` 从
+0.91 升到 0.9677，81.98–84.03 落在 `spk2 79.26–124.22` 这一段内。逐段 ASR
+输出：
+
+> 第二，这是巩固和发展**全党高度团结统一**、党心军心民心高度凝聚良好政治局面的必然要求。
+
+整句完整恢复，且不再出现 12s 周期的空洞。分离耗时 126.7s（与步长 6 的
+分离成本同量级），没有因为步长收紧而显著变慢。
+
+---
+
 ## 10. 风险与不做的事
 
 ### 风险
